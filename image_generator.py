@@ -1,9 +1,9 @@
 """
-image_generator.py - Diagram Generator using Pollinations AI (Free, No API Key)
+image_generator.py - Diagram Generator using Hugging Face (FLUX.1-schnell)
 """
 
+import os
 import logging
-import urllib.parse
 from typing import Optional
 import httpx
 
@@ -11,28 +11,36 @@ logger = logging.getLogger("EduBot.ImageGen")
 
 async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
     """
-    Generate an educational diagram using Pollinations AI.
-    Requires no API keys and uses the httpx library we already installed.
+    Generate an educational diagram using FLUX.1-schnell via Hugging Face Inference API.
     """
+    # FLUX.1-schnell is exceptionally fast and great at generating text/labels
+    API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+    
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        logger.error("HF_TOKEN is missing! Please add it to your environment variables.")
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {hf_token}",
+        "Content-Type": "application/json"
+    }
+    
+    # Enhance the prompt to ensure a clean, academic style
+    enhanced_prompt = f"A clear, educational textbook diagram, highly detailed, white background, clean labels. Subject: {prompt}"
+    
     try:
-        # We append some instructions to make it look like a textbook diagram
-        enhanced_prompt = f"Clear, educational textbook diagram, highly detailed, white background. {prompt}"
-        
-        # URL-encode the prompt so it's safe to put in a web link
-        safe_prompt = urllib.parse.quote(enhanced_prompt)
-        
-        # Pollinations AI generates images just by visiting a URL
-        url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=768&nologo=true&enhance=true"
-        
-        # FIX: Increased timeout to 60s and explicitly told httpx to follow redirects
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            response = await client.get(url)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                API_URL, 
+                headers=headers, 
+                json={"inputs": enhanced_prompt}
+            )
             
-            # If the request was successful, return the image bytes
             if response.status_code == 200:
                 return response.content, prompt
             else:
-                logger.error(f"Image API returned status code {response.status_code}")
+                logger.error(f"Hugging Face API Error {response.status_code}: {response.text}")
                 
     except Exception as e:
         logger.error(f"Image generation failed for '{prompt}': {e}")
