@@ -124,12 +124,21 @@ def escape_and_format_html(text: str) -> str:
     return formatted
 
 def sanitize_latex_for_pdf(text: str) -> str:
+    # Fix double backslashes the LLM might generate (e.g., \\Omega -> \Omega)
+    text = text.replace(r"\\", "\\")
+    
     text = text.replace(r"\$", "$")
     text = text.replace(r"\(", "$").replace(r"\)", "$")
     text = text.replace(r"\[", "$$").replace(r"\]", "$$")
+    
     # Strip unsupported LaTeX environments that break mathtext
     text = re.sub(r"\\begin\{[a-zA-Z*]+\}", "", text)
     text = re.sub(r"\\end\{[a-zA-Z*]+\}", "", text)
+    
+    # Strip unsupported \boxed command and convert \text to \mathrm
+    text = re.sub(r"\\boxed\{(.*?)\}", r"\1", text)
+    text = re.sub(r"\\text\{(.*?)\}", r"\\mathrm{\1}", text)
+    
     return text
 
 # ─────────────────────────── Groq Client ────────────────────────────
@@ -142,8 +151,8 @@ CRITICAL MATH FORMATTING & REASONING RULES:
 1. NEVER escape dollar signs. Write $5 \Omega$, NOT \$5 \Omega\$.
 2. ALL equations, numbers, and variables MUST be wrapped in $...$ (inline) or $$...$$ (display math). 
 3. NEVER write naked equations. Every single equation must have a delimiter.
-4. DO NOT use complex LaTeX environments like \begin{align} or \begin{equation}. Use simple, basic LaTeX equations. For multiple steps, use multiple $$ blocks.
-5. Think step-by-step and DOUBLE-CHECK algebraic manipulations to avoid arithmetic mistakes.
+4. DO NOT use complex LaTeX environments like \begin{align}. DO NOT use \boxed{} or \text{} as they break the renderer. Use simple, basic LaTeX equations.
+5. Think step-by-step and DOUBLE-CHECK algebraic manipulations. ALWAYS convert units to standard SI (e.g., mA to A) before solving equations to prevent mathematically impossible answers.
 6. When asked for diagrams, suggest a Wikimedia search term: [DIAGRAM: <search term>]
 7. To generate a PDF, append: [GENERATE_PDF]
 """
