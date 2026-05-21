@@ -1,46 +1,41 @@
 """
-image_generator.py - Diagram Generator using Gemini Nano Banana
+image_generator.py - Diagram Generator using Pollinations AI (Free, No API Key)
 """
 
-import os
 import logging
+import urllib.parse
 from typing import Optional
-from google import genai
-from google.genai import types
+import httpx
 
 logger = logging.getLogger("EduBot.ImageGen")
 
 async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
     """
-    Generate an educational diagram using Gemini's Nano Banana 2 model.
+    Generate an educational diagram using Pollinations AI.
+    Requires no API keys and uses the httpx library we already installed.
     """
     try:
-        # Failsafe to check if you added the key to Railway
-        if not os.environ.get("GEMINI_API_KEY"):
-            logger.error("GEMINI_API_KEY is missing from environment variables!")
-            return None
-
-        client = genai.Client()
+        # We append some instructions to make it look like a textbook diagram
+        enhanced_prompt = f"Clear, educational textbook diagram, highly detailed, white background. {prompt}"
         
-        # Nano Banana uses the generate_content endpoint with multimodal outputs, not generate_images
-        response = await client.aio.models.generate_content(
-            model='gemini-3.1-flash-image-preview',
-            contents=f"Clear, educational textbook diagram, high quality, white background. {prompt}",
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
-                image_config=types.ImageConfig(
-                    aspect_ratio="16:9"
-                )
-            )
-        )
+        # URL-encode the prompt so it's safe to put in a web link
+        safe_prompt = urllib.parse.quote(enhanced_prompt)
         
-        # Extract the raw image bytes from the response parts
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.inline_data:
-                    return part.inline_data.data, prompt
+        # Pollinations AI generates images just by visiting a URL
+        # We set nologo=true to remove watermarks, and enhance=true for better prompt understanding
+        url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=768&nologo=true&enhance=true"
+        
+        # Give it a 30-second timeout as image generation can take a few seconds
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(url)
             
+            # If the request was successful, return the image bytes
+            if response.status_code == 200:
+                return response.content, prompt
+            else:
+                logger.error(f"Image API returned status code {response.status_code}")
+                
     except Exception as e:
-        logger.error(f"Nano Banana generation failed for '{prompt}': {e}")
+        logger.error(f"Image generation failed for '{prompt}': {e}")
         
     return None
