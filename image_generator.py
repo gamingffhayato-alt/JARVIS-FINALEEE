@@ -15,23 +15,30 @@ async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
     Generate an educational diagram using Gemini's Nano Banana 2 model.
     """
     try:
-        # Client automatically picks up GEMINI_API_KEY from the environment
+        # Failsafe to check if you added the key to Railway
+        if not os.environ.get("GEMINI_API_KEY"):
+            logger.error("GEMINI_API_KEY is missing from environment variables!")
+            return None
+
         client = genai.Client()
         
-        # We use Nano Banana 2 (gemini-3.1-flash-image-preview) 
-        response = await client.aio.models.generate_images(
+        # Nano Banana uses the generate_content endpoint with multimodal outputs, not generate_images
+        response = await client.aio.models.generate_content(
             model='gemini-3.1-flash-image-preview',
-            prompt=f"Clear, educational textbook diagram, high quality, white background. {prompt}",
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-                output_mime_type="image/jpeg",
-                aspect_ratio="16:9"
+            contents=f"Clear, educational textbook diagram, high quality, white background. {prompt}",
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio="16:9"
+                )
             )
         )
         
-        if response.generated_images:
-            img_bytes = response.generated_images[0].image.image_bytes
-            return img_bytes, prompt
+        # Extract the raw image bytes from the response parts
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if part.inline_data:
+                    return part.inline_data.data, prompt
             
     except Exception as e:
         logger.error(f"Nano Banana generation failed for '{prompt}': {e}")
