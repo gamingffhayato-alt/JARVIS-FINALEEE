@@ -10,24 +10,27 @@ import io
 import re
 import sys
 import json
+import html
 import logging
 import asyncio
 import tempfile
 import traceback
 import base64
-import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
 import httpx
 import aiofiles
-import aiohttp
 from PIL import Image
 import matplotlib
 matplotlib.use("Agg")
+
+# Enable real LaTeX rendering (requires texlive/dvipng on the host machine)
+matplotlib.rcParams['text.usetex'] = True
+matplotlib.rcParams['text.latex.preamble'] = r'\usepackage{amsmath} \usepackage{amssymb}'
+
 import matplotlib.pyplot as plt
-import matplotlib.mathtext as mathtext
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
@@ -50,7 +53,7 @@ from groq import AsyncGroq
 
 BOT_TOKEN        = os.environ["TELEGRAM_BOT_TOKEN"]
 ERROR_BOT_TOKEN  = os.environ["TELEGRAM_ERROR_BOT_TOKEN"]
-ERROR_CHAT_ID    = os.environ["TELEGRAM_ERROR_CHAT_ID"]   # your personal chat/group id
+ERROR_CHAT_ID    = os.environ["TELEGRAM_ERROR_CHAT_ID"]
 GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
 
 GROQ_MODEL       = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -71,7 +74,6 @@ logger = logging.getLogger("EduBot")
 # ─────────────────────────── Error Reporter ─────────────────────────
 
 async def report_error(error: Exception, context_info: str = ""):
-    """Send detailed error info to the separate error bot."""
     tb = traceback.format_exc()
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     message = (
@@ -97,7 +99,6 @@ async def report_error(error: Exception, context_info: str = ""):
 
 
 def error_guard(context_label: str = ""):
-    """Decorator that catches exceptions, reports them, and replies gracefully."""
     def decorator(func):
         async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
             try:
@@ -117,35 +118,44 @@ def error_guard(context_label: str = ""):
         return wrapper
     return decorator
 
+# ─────────────────────────── Formatting Helpers ─────────────────────
+
+def escape_and_format_html(text: str) -> str:
+    """Escapes HTML symbols to prevent parser breaks and converts markdown bold."""
+    escaped = html.escape(text, quote=False)
+    # Convert **bold** to <b>bold</b>
+    formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', escaped)
+    return formatted
+
 # ─────────────────────────── Groq Client ────────────────────────────
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 SYSTEM_PROMPT = """You are EduBot — an expert AI tutor specialising in Physics, Mathematics, Chemistry, Biology, Computer Science, and all academic subjects.
 
-Guidelines:
+CRITICAL FORMATTING GUIDELINES:
 - Give clear, step-by-step explanations suited to the student's level.
-- For maths/physics, always show full working. Use LaTeX notation wrapped in $...$ for inline and $$...$$ for display equations.
+- For maths/physics, ALWAYS show full working. 
+- You MUST use ONLY $...$ for inline equations and $$...$$ for display equations. Do NOT use \[ \] or \( \) under any circumstances.
+- Keep equations well-structured and use standard LaTeX.
 - When asked for diagrams, suggest a Wikimedia search term in the format: [DIAGRAM: <search term>]
 - When asked to generate a PDF, respond with your full answer and append: [GENERATE_PDF]
-- Be encouraging, precise, and academically rigorous.
-- If an image is shared, analyse it and help the student understand it or solve problems in it.
 - Keep answers well-structured with headings where appropriate.
 """
 
 # ─────────────────────────── Math Renderer ──────────────────────────
 
-def render_latex_to_image(latex: str, dpi: int = 150) -> Optional[bytes]:
-    """Render a LaTeX expression to a PNG image using matplotlib."""
+def render_latex_to_image(latex: str, dpi: int = 200) -> Optional[bytes]:
+    """Render a LaTeX expression to a PNG image using matplotlib with real TeX."""
     try:
         fig = plt.figure(figsize=(8, 1.5))
         fig.patch.set_facecolor("white")
-        # Wrap in display math if not already
         expr = latex.strip()
         if not expr.startswith("$"):
             expr = f"${expr}$"
-        fig.text(0.5, 0.5, expr, fontsize=16, ha="center", va="center",
-                 color="black", usetex=False)
+            
+        fig.text(0.5, 0.5, expr, fontsize=16, ha="center", va="center", color="black")
+        
         buf = io.BytesIO()
         plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
                     pad_inches=0.2, facecolor="white")
@@ -153,26 +163,26 @@ def render_latex_to_image(latex: str, dpi: int = 150) -> Optional[bytes]:
         buf.seek(0)
         return buf.read()
     except Exception as e:
-        logger.warning(f"LaTeX render failed for '{latex[:60]}': {e}")
+        logger.warning(f"Real LaTeX render failed for '{latex[:60]}'. Ensure texlive/dvipng is installed. Error: {e}")
         plt.close("all")
         return None
 
 
 def extract_latex_blocks(text: str):
     """
-    Extract display math blocks ($$...$$) from text.
+    Standardize delimiters and extract display math blocks ($$...$$) from text.
     Returns list of (before_text, latex_expr, after_text) tuples.
     """
+    # Force convert common alternative block math delimiters to $$
+    text = text.replace("\\[", "$$").replace("\\]", "$$")
     parts = re.split(r"\$\$(.*?)\$\$", text, flags=re.DOTALL)
-    return parts  # alternating: text, latex, text, latex, ...
+    return parts
 
 # ─────────────────────────── Wikimedia ──────────────────────────────
 
 async def fetch_wikimedia_image(search_term: str) -> Optional[tuple[bytes, str]]:
-    """Search Wikimedia Commons and return (image_bytes, description)."""
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            # Search Commons
             params = {
                 "action": "query", "list": "search",
                 "srsearch": search_term, "srnamespace": "6",
@@ -181,8 +191,8 @@ async def fetch_wikimedia_image(search_term: str) -> Optional[tuple[bytes, str]]
             r = await client.get(WIKIMEDIA_COMMONS, params=params)
             data = r.json()
             results = data.get("query", {}).get("search", [])
+            
             if not results:
-                # Fallback: search Wikipedia for diagrams
                 params2 = {
                     "action": "query", "prop": "pageimages",
                     "titles": search_term, "pithumbsize": "600",
@@ -198,8 +208,7 @@ async def fetch_wikimedia_image(search_term: str) -> Optional[tuple[bytes, str]]
                         return img_r.content, search_term
                 return None
 
-            # Get the first result's image URL
-            title = results[0]["title"]  # e.g. "File:Diagram.svg"
+            title = results[0]["title"]
             params3 = {
                 "action": "query", "titles": title,
                 "prop": "imageinfo", "iiprop": "url|mime",
@@ -223,10 +232,6 @@ async def fetch_wikimedia_image(search_term: str) -> Optional[tuple[bytes, str]]
 # ─────────────────────────── PDF Generator ──────────────────────────
 
 def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] = None) -> bytes:
-    """
-    Build a polished PDF from markdown-like content.
-    Renders $$...$$ blocks as images. Appends diagram images.
-    """
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
@@ -254,17 +259,14 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
 
     story = []
 
-    # Title
     story.append(Paragraph(title, style_title))
     story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#3949ab")))
     story.append(Spacer(1, 10))
 
-    # Process content line by line
     parts = extract_latex_blocks(content)
-    # parts = [text, latex, text, latex, ...]
+    
     for i, part in enumerate(parts):
         if i % 2 == 1:
-            # LaTeX display block — render to image
             img_bytes = render_latex_to_image(part)
             if img_bytes:
                 tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
@@ -280,38 +282,39 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
                 finally:
                     os.unlink(tmp_path)
             else:
-                # Fallback: show as monospace
                 story.append(Paragraph(f"<font name='Courier'>{part}</font>", style_code))
         else:
-            # Regular text — parse simple markdown
             lines = part.split("\n")
             for line in lines:
                 line = line.strip()
                 if not line:
                     story.append(Spacer(1, 4))
                     continue
-                if line.startswith("### "):
-                    story.append(Paragraph(line[4:], style_h2))
-                elif line.startswith("## "):
-                    story.append(Paragraph(line[3:], style_h1))
-                elif line.startswith("# "):
-                    story.append(Paragraph(line[2:], style_h1))
-                elif line.startswith("**") and line.endswith("**"):
-                    story.append(Paragraph(f"<b>{line[2:-2]}</b>", style_body))
-                elif line.startswith("- ") or line.startswith("* "):
-                    story.append(Paragraph(f"• {line[2:]}", style_body))
-                elif re.match(r"^\d+\. ", line):
-                    story.append(Paragraph(line, style_body))
-                elif line.startswith("`") and line.endswith("`"):
-                    story.append(Paragraph(f"<font name='Courier'>{line[1:-1]}</font>", style_code))
+                
+                escaped_line = html.escape(line)
+                
+                if escaped_line.startswith("### "):
+                    story.append(Paragraph(escaped_line[4:], style_h2))
+                elif escaped_line.startswith("## "):
+                    story.append(Paragraph(escaped_line[3:], style_h1))
+                elif escaped_line.startswith("# "):
+                    story.append(Paragraph(escaped_line[2:], style_h1))
+                elif re.match(r"^\d+\. ", escaped_line):
+                    # Handle bolding inside standard lines
+                    bolded = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", escaped_line)
+                    story.append(Paragraph(bolded, style_body))
+                elif escaped_line.startswith("- ") or escaped_line.startswith("* "):
+                    bolded = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", escaped_line[2:])
+                    story.append(Paragraph(f"• {bolded}", style_body))
+                elif escaped_line.startswith("`") and escaped_line.endswith("`"):
+                    story.append(Paragraph(f"<font name='Courier'>{escaped_line[1:-1]}</font>", style_code))
                 else:
-                    # Inline math $...$ — render inline by showing in code font
+                    bolded = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", escaped_line)
                     processed = re.sub(r"\$([^$]+)\$",
                                        lambda m: f"<font name='Courier' color='#1a237e'>{m.group(1)}</font>",
-                                       line)
+                                       bolded)
                     story.append(Paragraph(processed, style_body))
 
-    # Diagrams section
     if diagram_images:
         story.append(PageBreak())
         story.append(Paragraph("📊 Diagrams", style_h1))
@@ -319,7 +322,6 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
         story.append(Spacer(1, 8))
         for img_bytes, caption in diagram_images:
             tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            # Convert to PNG if needed
             try:
                 pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                 pil_img.save(tmp.name, "PNG")
@@ -333,13 +335,12 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
                 story.append(KeepTogether([
                     rl_img,
                     Spacer(1, 4),
-                    Paragraph(caption, style_caption),
+                    Paragraph(html.escape(caption), style_caption),
                     Spacer(1, 12),
                 ]))
             finally:
                 os.unlink(tmp.name)
 
-    # Footer timestamp
     story.append(Spacer(1, 20))
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey))
     story.append(Paragraph(
@@ -364,7 +365,6 @@ async def ask_groq_text(messages: list) -> str:
 
 
 async def transcribe_audio(audio_bytes: bytes, filename: str = "audio.ogg") -> str:
-    """Transcribe audio using Groq Whisper."""
     with tempfile.NamedTemporaryFile(suffix=Path(filename).suffix or ".ogg", delete=False) as f:
         f.write(audio_bytes)
         tmp_path = f.name
@@ -381,7 +381,6 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "audio.ogg") -> s
 
 
 async def ask_groq_vision(image_bytes: bytes, prompt: str, mime: str = "image/jpeg") -> str:
-    """Send an image + prompt to Llama 4 Scout (vision)."""
     b64 = base64.b64encode(image_bytes).decode()
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -399,7 +398,6 @@ async def ask_groq_vision(image_bytes: bytes, prompt: str, mime: str = "image/jp
 
 # ─────────────────────────── Conversation Store ─────────────────────
 
-# Simple in-memory conversation history per user
 conversation_history: dict[int, list] = {}
 
 def get_history(user_id: int) -> list:
@@ -410,7 +408,6 @@ def get_history(user_id: int) -> list:
 def add_message(user_id: int, role: str, content):
     history = get_history(user_id)
     history.append({"role": role, "content": content})
-    # Keep last 20 exchanges (40 messages) + system
     if len(history) > 41:
         conversation_history[user_id] = [history[0]] + history[-40:]
 
@@ -419,22 +416,22 @@ def add_message(user_id: int, role: str, content):
 @error_guard("start")
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name or "Student"
-    await update.message.reply_text(
-        f"👋 Hello *{name}*\\! I'm *EduBot* — your AI tutor\\.\n\n"
+    msg = (
+        f"👋 Hello <b>{html.escape(name)}</b>! I'm <b>EduBot</b> — your AI tutor.\n\n"
         f"I can help you with:\n"
-        f"📐 *Maths & Physics* — step\\-by\\-step solutions\n"
-        f"🧪 *Chemistry & Biology*\n"
-        f"💻 *Computer Science*\n"
-        f"📊 *Diagrams* from Wikimedia\n"
-        f"📄 *PDF notes* with rendered equations\n\n"
-        f"Send me a *text question*, an *image*, or a *voice message*\\!\n\n"
+        f"📐 <b>Maths & Physics</b> — step-by-step solutions\n"
+        f"🧪 <b>Chemistry & Biology</b>\n"
+        f"💻 <b>Computer Science</b>\n"
+        f"📊 <b>Diagrams</b> from Wikimedia\n"
+        f"📄 <b>PDF notes</b> with rendered equations\n\n"
+        f"Send me a <b>text question</b>, an <b>image</b>, or a <b>voice message</b>!\n\n"
         f"Commands:\n"
         f"/pdf — convert last answer to PDF\n"
-        f"/diagram \\<topic\\> — fetch a diagram\n"
+        f"/diagram &lt;topic&gt; — fetch a diagram\n"
         f"/clear — clear chat history\n"
-        f"/help — show this message",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        f"/help — show this message"
     )
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 
 @error_guard("help")
@@ -453,20 +450,21 @@ async def cmd_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     history = get_history(uid)
-    # Find the last assistant message
     last_answer = next((m["content"] for m in reversed(history) if m["role"] == "assistant"), None)
     if not last_answer:
         await update.message.reply_text("No previous answer found. Ask me something first!")
         return
+        
     await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
     question = next((m["content"] for m in reversed(history) if m["role"] == "user"), "Answer")
     title = (question[:60] + "...") if len(question) > 60 else question
-    # Check for diagram tags
+    
     diagram_data = []
     for tag in re.findall(r"\[DIAGRAM:\s*(.+?)\]", last_answer):
         result = await fetch_wikimedia_image(tag)
         if result:
             diagram_data.append(result)
+            
     pdf_bytes = build_pdf(title, last_answer, diagram_data)
     await update.message.reply_document(
         document=InputFile(io.BytesIO(pdf_bytes), filename="EduBot_Notes.pdf"),
@@ -478,19 +476,20 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_diagram(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = " ".join(ctx.args) if ctx.args else ""
     if not query:
-        await update.message.reply_text("Usage: /diagram <topic>\nExample: /diagram Newton's laws of motion")
+        await update.message.reply_text("Usage: /diagram &lt;topic&gt;\nExample: /diagram Newton's laws of motion", parse_mode=ParseMode.HTML)
         return
+        
     await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
     result = await fetch_wikimedia_image(query)
     if result:
         img_bytes, caption = result
         await update.message.reply_photo(
             photo=InputFile(io.BytesIO(img_bytes), filename="diagram.png"),
-            caption=f"📊 *{caption}*\nSource: Wikimedia Commons",
-            parse_mode=ParseMode.MARKDOWN,
+            caption=f"📊 <b>{escape_and_format_html(caption)}</b>\nSource: Wikimedia Commons",
+            parse_mode=ParseMode.HTML,
         )
     else:
-        await update.message.reply_text(f"❌ No diagram found for '{query}'. Try a different search term.")
+        await update.message.reply_text(f"❌ No diagram found for '{escape_and_format_html(query)}'. Try a different search term.", parse_mode=ParseMode.HTML)
 
 
 @error_guard("text_message")
@@ -506,20 +505,17 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     response_text = await ask_groq_text(history)
     add_message(uid, "assistant", response_text)
 
-    # Check if PDF generation was requested
     generate_pdf = "[GENERATE_PDF]" in response_text
     clean_response = response_text.replace("[GENERATE_PDF]", "").strip()
 
-    # Check for diagram tags
     diagram_tags = re.findall(r"\[DIAGRAM:\s*(.+?)\]", clean_response)
     display_text = re.sub(r"\[DIAGRAM:\s*.+?\]", "", clean_response).strip()
 
-    # Send text response (split if > 4096 chars)
-    chunks = [display_text[i:i+4000] for i in range(0, len(display_text), 4000)]
+    formatted_text = escape_and_format_html(display_text)
+    chunks = [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]
     for chunk in chunks:
-        await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
-    # Fetch and send diagrams
     for tag in diagram_tags:
         await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
         result = await fetch_wikimedia_image(tag)
@@ -527,11 +523,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             img_bytes, caption = result
             await update.message.reply_photo(
                 photo=InputFile(io.BytesIO(img_bytes), filename="diagram.png"),
-                caption=f"📊 *{caption}* (Wikimedia Commons)",
-                parse_mode=ParseMode.MARKDOWN,
+                caption=f"📊 <b>{escape_and_format_html(caption)}</b> (Wikimedia Commons)",
+                parse_mode=ParseMode.HTML,
             )
 
-    # Auto-generate PDF if requested
     if generate_pdf:
         await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
         diagram_data = []
@@ -554,7 +549,6 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.chat.send_action(ChatAction.TYPING)
 
-    # Get highest resolution photo
     photo = update.message.photo[-1]
     photo_file = await photo.get_file()
     img_bytes = await photo_file.download_as_bytearray()
@@ -567,9 +561,10 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     diagram_tags = re.findall(r"\[DIAGRAM:\s*(.+?)\]", clean_response)
     display_text = re.sub(r"\[DIAGRAM:\s*.+?\]", "", clean_response).strip()
 
-    chunks = [display_text[i:i+4000] for i in range(0, len(display_text), 4000)]
+    formatted_text = escape_and_format_html(display_text)
+    chunks = [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]
     for chunk in chunks:
-        await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
     for tag in diagram_tags:
         result = await fetch_wikimedia_image(tag)
@@ -577,7 +572,8 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             img_bytes2, caption2 = result
             await update.message.reply_photo(
                 photo=InputFile(io.BytesIO(img_bytes2), filename="diagram.png"),
-                caption=f"📊 {caption2}",
+                caption=f"📊 {escape_and_format_html(caption2)}",
+                parse_mode=ParseMode.HTML,
             )
 
     if "[GENERATE_PDF]" in response_text:
@@ -592,9 +588,8 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @error_guard("audio_message")
 async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-
-    # Get audio file (voice note or audio file)
     audio = update.message.voice or update.message.audio
+    
     if not audio:
         return
 
@@ -611,7 +606,7 @@ async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Could not transcribe the audio. Please try again.")
         return
 
-    await update.message.reply_text(f"📝 *Transcribed:* {transcript}", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"📝 <b>Transcribed:</b> {escape_and_format_html(transcript)}", parse_mode=ParseMode.HTML)
     await update.message.chat.send_action(ChatAction.TYPING)
 
     add_message(uid, "user", transcript)
@@ -623,9 +618,10 @@ async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     diagram_tags = re.findall(r"\[DIAGRAM:\s*(.+?)\]", clean_response)
     display_text = re.sub(r"\[DIAGRAM:\s*.+?\]", "", clean_response).strip()
 
-    chunks = [display_text[i:i+4000] for i in range(0, len(display_text), 4000)]
+    formatted_text = escape_and_format_html(display_text)
+    chunks = [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]
     for chunk in chunks:
-        await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
     for tag in diagram_tags:
         result = await fetch_wikimedia_image(tag)
@@ -633,7 +629,8 @@ async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             img_bytes2, caption2 = result
             await update.message.reply_photo(
                 photo=InputFile(io.BytesIO(img_bytes2), filename="diagram.png"),
-                caption=f"📊 {caption2}",
+                caption=f"📊 {escape_and_format_html(caption2)}",
+                parse_mode=ParseMode.HTML,
             )
 
     if "[GENERATE_PDF]" in response_text:
@@ -651,17 +648,20 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mime = doc.mime_type or ""
 
     if "image" in mime:
-        # Treat as image
         await update.message.chat.send_action(ChatAction.TYPING)
         doc_file = await doc.get_file()
         img_bytes = await doc_file.download_as_bytearray()
         caption = update.message.caption or "Analyse this image."
         uid = update.effective_user.id
+        
         response_text = await ask_groq_vision(bytes(img_bytes), caption, mime)
         add_message(uid, "assistant", response_text)
+        
         clean = response_text.replace("[GENERATE_PDF]", "").strip()
-        for chunk in [clean[i:i+4000] for i in range(0, len(clean), 4000)]:
-            await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN)
+        formatted_text = escape_and_format_html(clean)
+        
+        for chunk in [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]:
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
     else:
         await update.message.reply_text(
             "📁 I can process image files. For PDFs or text files, "
@@ -670,7 +670,6 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
-    """Catch-all Telegram error handler."""
     exc = ctx.error
     logger.error(f"Unhandled error: {exc}")
     await report_error(exc, f"global_error_handler | update={type(update).__name__}")
