@@ -21,14 +21,13 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
-import aiofiles
 from PIL import Image
 import matplotlib
 matplotlib.use("Agg")
 
-# Enable real LaTeX rendering (requires texlive/dvipng on the host machine)
-matplotlib.rcParams['text.usetex'] = True
-matplotlib.rcParams['text.latex.preamble'] = r'\usepackage{amsmath} \usepackage{amssymb}'
+# Use Matplotlib's built-in math renderer (requires ZERO external TeX installations)
+matplotlib.rcParams['text.usetex'] = False
+matplotlib.rcParams['mathtext.fontset'] = 'cm'
 
 import matplotlib.pyplot as plt
 from reportlab.lib.pagesizes import A4
@@ -97,7 +96,6 @@ async def report_error(error: Exception, context_info: str = ""):
     except Exception as e:
         logger.error(f"Failed to send error report: {e}")
 
-
 def error_guard(context_label: str = ""):
     def decorator(func):
         async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
@@ -121,40 +119,17 @@ def error_guard(context_label: str = ""):
 # ─────────────────────────── Formatting Helpers ─────────────────────
 
 def escape_and_format_html(text: str) -> str:
-    """Escapes HTML symbols to prevent parser breaks and converts markdown bold."""
     escaped = html.escape(text, quote=False)
-    # Convert **bold** to <b>bold</b>
     formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', escaped)
     return formatted
 
 def sanitize_latex_for_pdf(text: str) -> str:
-    """Cleans up LLM math formatting and converts basic inline LaTeX to Unicode."""
-    # Unescape mistakenly escaped dollar signs
     text = text.replace(r"\$", "$")
-    
-    # Force common alternative delimiters into standard $ and $$
     text = text.replace(r"\(", "$").replace(r"\)", "$")
     text = text.replace(r"\[", "$$").replace(r"\]", "$$")
-    
-    # Basic Unicode replacements for inline text so ReportLab doesn't just print raw LaTeX code
-    replacements = {
-        r"\Omega": "Ω",
-        r"\cdot": "·",
-        r"\approx": "≈",
-        r"\pi": "π",
-        r"\theta": "θ",
-        r"\alpha": "α",
-        r"\beta": "β",
-        r"\Delta": "Δ",
-        r"\mu": "μ",
-        r"\infty": "∞",
-        r"\pm": "±",
-        r"\_": "_" # Fix mistakenly escaped underscores
-    }
-    
-    for latex_cmd, unicode_char in replacements.items():
-        text = text.replace(latex_cmd, unicode_char)
-        
+    # Strip unsupported LaTeX environments that break mathtext
+    text = re.sub(r"\\begin\{[a-zA-Z*]+\}", "", text)
+    text = re.sub(r"\\end\{[a-zA-Z*]+\}", "", text)
     return text
 
 # ─────────────────────────── Groq Client ────────────────────────────
@@ -163,46 +138,51 @@ groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 SYSTEM_PROMPT = """You are EduBot — an expert AI tutor.
 
-CRITICAL MATH FORMATTING RULES (STRICTLY ENFORCED):
+CRITICAL MATH FORMATTING & REASONING RULES:
 1. NEVER escape dollar signs. Write $5 \Omega$, NOT \$5 \Omega\$.
 2. ALL equations, numbers, and variables MUST be wrapped in $...$ (inline) or $$...$$ (display math). 
 3. NEVER write naked equations. Every single equation must have a delimiter.
-4. For complex fractions or large equations, ALWAYS use display math: $$...$$
-5. Give clear, step-by-step explanations suited to the student's level.
-6. When asked for diagrams, suggest a Wikimedia search term in the format: [DIAGRAM: <search term>]
-7. When asked to generate a PDF, respond with your full answer and append: [GENERATE_PDF]
-8. Keep answers well-structured with headings where appropriate.
+4. DO NOT use complex LaTeX environments like \begin{align} or \begin{equation}. Use simple, basic LaTeX equations. For multiple steps, use multiple $$ blocks.
+5. Think step-by-step and DOUBLE-CHECK algebraic manipulations to avoid arithmetic mistakes.
+6. When asked for diagrams, suggest a Wikimedia search term: [DIAGRAM: <search term>]
+7. To generate a PDF, append: [GENERATE_PDF]
 """
 
 # ─────────────────────────── Math Renderer ──────────────────────────
 
-def render_latex_to_image(latex: str, dpi: int = 200) -> Optional[bytes]:
-    """Render a LaTeX expression to a PNG image using matplotlib with real TeX."""
+def render_math_to_image(latex: str, dpi: int = 150, inline: bool = False) -> Optional[tuple[bytes, float, float]]:
+    """Renders LaTeX to PNG using built-in mathtext. Returns (bytes, width_pt, height_pt)."""
     try:
-        fig = plt.figure(figsize=(8, 1.5))
+        fig = plt.figure(figsize=(0.01, 0.01))
         fig.patch.set_facecolor("white")
+        
         expr = latex.strip()
         if not expr.startswith("$"):
             expr = f"${expr}$"
             
-        fig.text(0.5, 0.5, expr, fontsize=16, ha="center", va="center", color="black")
+        fontsize = 12 if inline else 16
+        t = fig.text(0, 0, expr, fontsize=fontsize, color="black")
         
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
-                    pad_inches=0.2, facecolor="white")
+        plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", pad_inches=0.03, facecolor="white")
         plt.close(fig)
         buf.seek(0)
-        return buf.read()
+        
+        img_bytes = buf.read()
+        with Image.open(io.BytesIO(img_bytes)) as img:
+            w_px, h_px = img.size
+            # Convert pixels at current DPI to ReportLab points (72 pts per inch)
+            scale = 1.05 if inline else 1.2
+            w_pt = (w_px / dpi) * 72 * scale
+            h_pt = (h_px / dpi) * 72 * scale
+            
+        return img_bytes, w_pt, h_pt
     except Exception as e:
-        logger.warning(f"Real LaTeX render failed for '{latex[:60]}'. Ensure texlive/dvipng is installed. Error: {e}")
+        logger.warning(f"Mathtext render failed for '{latex[:60]}': {e}")
         plt.close("all")
         return None
 
 def extract_latex_blocks(text: str):
-    """
-    Extract display math blocks ($$...$$) from text.
-    Returns list of (before_text, latex_expr, after_text) tuples.
-    """
     parts = re.split(r"\$\$(.*?)\$\$", text, flags=re.DOTALL)
     return parts
 
@@ -262,143 +242,146 @@ async def fetch_wikimedia_image(search_term: str) -> Optional[tuple[bytes, str]]
 def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] = None) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf, pagesize=A4,
-        rightMargin=2*cm, leftMargin=2*cm,
-        topMargin=2.5*cm, bottomMargin=2*cm,
-        title=title
+        buf, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm,
+        topMargin=2.5*cm, bottomMargin=2*cm, title=title
     )
 
     styles = getSampleStyleSheet()
-    style_title  = ParagraphStyle("EduTitle",  parent=styles["Title"],
-                                   fontSize=22, spaceAfter=14, textColor=colors.HexColor("#1a237e"))
-    style_h1     = ParagraphStyle("EduH1",     parent=styles["Heading1"],
-                                   fontSize=16, spaceBefore=12, spaceAfter=6,
-                                   textColor=colors.HexColor("#283593"))
-    style_h2     = ParagraphStyle("EduH2",     parent=styles["Heading2"],
-                                   fontSize=13, spaceBefore=8, spaceAfter=4,
-                                   textColor=colors.HexColor("#3949ab"))
-    style_body   = ParagraphStyle("EduBody",   parent=styles["Normal"],
-                                   fontSize=11, leading=16, alignment=TA_JUSTIFY)
-    style_code   = ParagraphStyle("EduCode",   parent=styles["Code"],
-                                   fontSize=9,  leading=13, backColor=colors.HexColor("#f5f5f5"),
-                                   borderPadding=4)
-    style_caption = ParagraphStyle("EduCaption", parent=styles["Normal"],
-                                    fontSize=9, textColor=colors.grey, alignment=TA_CENTER)
+    style_title  = ParagraphStyle("EduTitle", parent=styles["Title"], fontSize=22, spaceAfter=14, textColor=colors.HexColor("#1a237e"))
+    style_h1     = ParagraphStyle("EduH1", parent=styles["Heading1"], fontSize=16, spaceBefore=12, spaceAfter=6, textColor=colors.HexColor("#283593"))
+    style_h2     = ParagraphStyle("EduH2", parent=styles["Heading2"], fontSize=13, spaceBefore=8, spaceAfter=4, textColor=colors.HexColor("#3949ab"))
+    style_body   = ParagraphStyle("EduBody", parent=styles["Normal"], fontSize=11, leading=18, alignment=TA_JUSTIFY)
+    style_code   = ParagraphStyle("EduCode", parent=styles["Code"], fontSize=9, backColor=colors.HexColor("#f5f5f5"), borderPadding=4)
+    style_caption = ParagraphStyle("EduCaption", parent=styles["Normal"], fontSize=9, textColor=colors.grey, alignment=TA_CENTER)
 
     story = []
+    temp_files = []
 
-    story.append(Paragraph(title, style_title))
-    story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#3949ab")))
-    story.append(Spacer(1, 10))
-
-    # Clean the text before doing any PDF processing
-    clean_content = sanitize_latex_for_pdf(content)
-    parts = extract_latex_blocks(clean_content)
-    
-    for i, part in enumerate(parts):
-        if i % 2 == 1:
-            img_bytes = render_latex_to_image(part)
-            if img_bytes:
+    def process_text_line(text, style):
+        math_store = []
+        def store_math(m):
+            math_store.append(m.group(1))
+            return f"__MATH_{len(math_store)-1}__"
+            
+        # Isolate math so it doesn't get ruined by html.escape
+        text = re.sub(r"\$([^$]+)\$", store_math, text)
+        text = html.escape(text)
+        text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+        
+        def inject_math(m):
+            idx = int(m.group(1))
+            latex = math_store[idx]
+            res = render_math_to_image(latex, inline=True)
+            if res:
+                img_b, w, h = res
                 tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                tmp.write(img_bytes)
+                tmp.write(img_b)
                 tmp.flush()
-                tmp_path = tmp.name
+                temp_files.append(tmp.name)
                 tmp.close()
-                try:
-                    rl_img = RLImage(tmp_path, width=13*cm, height=None)
+                # Use negative valign to align image nicely with text baseline
+                return f'<img src="{tmp.name}" width="{w}" height="{h}" valign="{-h*0.2}"/>'
+            else:
+                return f"<font name='Courier' color='#1a237e'>{html.escape(latex)}</font>"
+                
+        text = re.sub(r"__MATH_(\d+)__", inject_math, text)
+        return Paragraph(text, style)
+
+    try:
+        story.append(Paragraph(title, style_title))
+        story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#3949ab")))
+        story.append(Spacer(1, 10))
+
+        clean_content = sanitize_latex_for_pdf(content)
+        parts = extract_latex_blocks(clean_content)
+        
+        for i, part in enumerate(parts):
+            if i % 2 == 1:
+                # Display block math
+                res = render_math_to_image(part, inline=False)
+                if res:
+                    img_b, w, h = res
+                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    tmp.write(img_b)
+                    tmp.flush()
+                    temp_files.append(tmp.name)
+                    tmp.close()
+                    rl_img = RLImage(tmp.name, width=w, height=h)
                     rl_img.hAlign = "CENTER"
                     story.append(rl_img)
                     story.append(Spacer(1, 4))
-                finally:
-                    os.unlink(tmp_path)
-            else:
-                story.append(Paragraph(f"<font name='Courier'>{part}</font>", style_code))
-        else:
-            lines = part.split("\n")
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    story.append(Spacer(1, 4))
-                    continue
-                
-                escaped_line = html.escape(line)
-                
-                if escaped_line.startswith("### "):
-                    story.append(Paragraph(escaped_line[4:], style_h2))
-                elif escaped_line.startswith("## "):
-                    story.append(Paragraph(escaped_line[3:], style_h1))
-                elif escaped_line.startswith("# "):
-                    story.append(Paragraph(escaped_line[2:], style_h1))
-                elif re.match(r"^\d+\. ", escaped_line):
-                    # Handle bolding inside standard lines
-                    bolded = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", escaped_line)
-                    processed = re.sub(r"\$([^$]+)\$",
-                                       lambda m: f"<font name='Courier' color='#1a237e'>{m.group(1)}</font>",
-                                       bolded)
-                    story.append(Paragraph(processed, style_body))
-                elif escaped_line.startswith("- ") or escaped_line.startswith("* "):
-                    bolded = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", escaped_line[2:])
-                    processed = re.sub(r"\$([^$]+)\$",
-                                       lambda m: f"<font name='Courier' color='#1a237e'>{m.group(1)}</font>",
-                                       bolded)
-                    story.append(Paragraph(f"• {processed}", style_body))
-                elif escaped_line.startswith("`") and escaped_line.endswith("`"):
-                    story.append(Paragraph(f"<font name='Courier'>{escaped_line[1:-1]}</font>", style_code))
                 else:
-                    bolded = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", escaped_line)
-                    processed = re.sub(r"\$([^$]+)\$",
-                                       lambda m: f"<font name='Courier' color='#1a237e'>{m.group(1)}</font>",
-                                       bolded)
-                    story.append(Paragraph(processed, style_body))
+                    story.append(Paragraph(f"<font name='Courier'>{html.escape(part)}</font>", style_code))
+            else:
+                # Text processing
+                lines = part.split("\n")
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        story.append(Spacer(1, 4))
+                        continue
+                    
+                    if line.startswith("### "):
+                        story.append(process_text_line(line[4:], style_h2))
+                    elif line.startswith("## "):
+                        story.append(process_text_line(line[3:], style_h1))
+                    elif line.startswith("# "):
+                        story.append(process_text_line(line[2:], style_h1))
+                    elif line.startswith("- ") or line.startswith("* "):
+                        story.append(process_text_line(f"• {line[2:]}", style_body))
+                    elif line.startswith("`") and line.endswith("`"):
+                        story.append(Paragraph(f"<font name='Courier'>{html.escape(line[1:-1])}</font>", style_code))
+                    else:
+                        story.append(process_text_line(line, style_body))
 
-    if diagram_images:
-        story.append(PageBreak())
-        story.append(Paragraph("📊 Diagrams", style_h1))
-        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#3949ab")))
-        story.append(Spacer(1, 8))
-        for img_bytes, caption in diagram_images:
-            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            try:
-                pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                pil_img.save(tmp.name, "PNG")
-            except Exception:
-                tmp.write(img_bytes)
-                tmp.flush()
-            tmp.close()
-            try:
+        if diagram_images:
+            story.append(PageBreak())
+            story.append(Paragraph("📊 Diagrams", style_h1))
+            story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#3949ab")))
+            story.append(Spacer(1, 8))
+            for img_bytes, caption in diagram_images:
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                temp_files.append(tmp.name)
+                try:
+                    pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                    pil_img.save(tmp.name, "PNG")
+                except Exception:
+                    tmp.write(img_bytes)
+                    tmp.flush()
+                tmp.close()
                 rl_img = RLImage(tmp.name, width=14*cm, height=None)
                 rl_img.hAlign = "CENTER"
                 story.append(KeepTogether([
-                    rl_img,
-                    Spacer(1, 4),
+                    rl_img, Spacer(1, 4),
                     Paragraph(html.escape(caption), style_caption),
                     Spacer(1, 12),
                 ]))
-            finally:
-                os.unlink(tmp.name)
 
-    story.append(Spacer(1, 20))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey))
-    story.append(Paragraph(
-        f"Generated by EduBot on {datetime.utcnow().strftime('%B %d, %Y at %H:%M UTC')}",
-        style_caption
-    ))
+        story.append(Spacer(1, 20))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey))
+        story.append(Paragraph(
+            f"Generated by EduBot on {datetime.utcnow().strftime('%B %d, %Y at %H:%M UTC')}",
+            style_caption
+        ))
 
-    doc.build(story)
-    buf.seek(0)
-    return buf.read()
+        doc.build(story)
+        buf.seek(0)
+        return buf.read()
+    
+    finally:
+        for f in temp_files:
+            try:
+                os.unlink(f)
+            except Exception:
+                pass
 
 # ─────────────────────────── Groq Helpers ───────────────────────────
 
 async def ask_groq_text(messages: list) -> str:
     response = await groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        max_tokens=MAX_TOKENS,
-        temperature=0.7,
+        model=GROQ_MODEL, messages=messages, max_tokens=MAX_TOKENS, temperature=0.7,
     )
     return response.choices[0].message.content
-
 
 async def transcribe_audio(audio_bytes: bytes, filename: str = "audio.ogg") -> str:
     with tempfile.NamedTemporaryFile(suffix=Path(filename).suffix or ".ogg", delete=False) as f:
@@ -407,14 +390,11 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "audio.ogg") -> s
     try:
         with open(tmp_path, "rb") as af:
             transcription = await groq_client.audio.transcriptions.create(
-                file=(filename, af),
-                model=WHISPER_MODEL,
-                response_format="text",
+                file=(filename, af), model=WHISPER_MODEL, response_format="text",
             )
         return transcription
     finally:
         os.unlink(tmp_path)
-
 
 async def ask_groq_vision(image_bytes: bytes, prompt: str, mime: str = "image/jpeg") -> str:
     b64 = base64.b64encode(image_bytes).decode()
@@ -422,13 +402,11 @@ async def ask_groq_vision(image_bytes: bytes, prompt: str, mime: str = "image/jp
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-            {"type": "text", "text": prompt or "Please analyse this image and explain the educational content."}
+            {"type": "text", "text": prompt or "Please analyse this image and explain."}
         ]}
     ]
     response = await groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        max_tokens=MAX_TOKENS,
+        model=GROQ_MODEL, messages=messages, max_tokens=MAX_TOKENS,
     )
     return response.choices[0].message.content
 
