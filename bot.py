@@ -124,8 +124,8 @@ def escape_and_format_html(text: str) -> str:
     return formatted
 
 def sanitize_latex_for_pdf(text: str) -> str:
-    # Fix double backslashes the LLM might generate (e.g., \\Omega -> \Omega)
-    text = text.replace(r"\\", "\\")
+    # Safely convert double backslashes before letters to single backslashes
+    text = re.sub(r"\\\\([a-zA-Z])", r"\\\1", text)
     
     text = text.replace(r"\$", "$")
     text = text.replace(r"\(", "$").replace(r"\)", "$")
@@ -151,10 +151,12 @@ CRITICAL MATH FORMATTING & REASONING RULES:
 1. NEVER escape dollar signs. Write $5 \Omega$, NOT \$5 \Omega\$.
 2. ALL equations, numbers, and variables MUST be wrapped in $...$ (inline) or $$...$$ (display math). 
 3. NEVER write naked equations. Every single equation must have a delimiter.
-4. DO NOT use complex LaTeX environments like \begin{align}. DO NOT use \boxed{} or \text{} as they break the renderer. Use simple, basic LaTeX equations.
-5. Think step-by-step and DOUBLE-CHECK algebraic manipulations. ALWAYS convert units to standard SI (e.g., mA to A) before solving equations to prevent mathematically impossible answers.
-6. When asked for diagrams, suggest a Wikimedia search term: [DIAGRAM: <search term>]
-7. To generate a PDF, append: [GENERATE_PDF]
+4. DO NOT use complex LaTeX environments like \begin{vmatrix}, \begin{matrix}, \begin{array}, \begin{align}, etc.
+5. For cross products and determinants, DO NOT draw a matrix. Write the algebraic expansion linearly. Example: $\vec{A} \times \vec{B} = (A_y B_z - A_z B_y)\hat{i} - ...$
+6. DO NOT use \boxed{} or \text{} as they break the renderer. Use simple, basic LaTeX equations. Use \mathrm{} instead of \text{}.
+7. Think step-by-step and DOUBLE-CHECK algebraic manipulations. ALWAYS convert units to standard SI (e.g., mA to A) before solving equations.
+8. When asked for diagrams, suggest a Wikimedia search term: [DIAGRAM: <search term>]
+9. To generate a PDF, append: [GENERATE_PDF]
 """
 
 # ─────────────────────────── Math Renderer ──────────────────────────
