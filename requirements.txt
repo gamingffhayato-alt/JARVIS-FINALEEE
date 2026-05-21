@@ -1,0 +1,9 @@
+# EduBot Requirements
+python-telegram-bot==21.6
+groq==0.11.0
+httpx==0.27.2
+aiohttp==3.10.10
+aiofiles==24.1.0
+Pillow==10.4.0
+matplotlib==3.9.2
+reportlab==4.2.2
