@@ -127,20 +127,51 @@ def escape_and_format_html(text: str) -> str:
     formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', escaped)
     return formatted
 
+def sanitize_latex_for_pdf(text: str) -> str:
+    """Cleans up LLM math formatting and converts basic inline LaTeX to Unicode."""
+    # Unescape mistakenly escaped dollar signs
+    text = text.replace(r"\$", "$")
+    
+    # Force common alternative delimiters into standard $ and $$
+    text = text.replace(r"\(", "$").replace(r"\)", "$")
+    text = text.replace(r"\[", "$$").replace(r"\]", "$$")
+    
+    # Basic Unicode replacements for inline text so ReportLab doesn't just print raw LaTeX code
+    replacements = {
+        r"\Omega": "Ω",
+        r"\cdot": "·",
+        r"\approx": "≈",
+        r"\pi": "π",
+        r"\theta": "θ",
+        r"\alpha": "α",
+        r"\beta": "β",
+        r"\Delta": "Δ",
+        r"\mu": "μ",
+        r"\infty": "∞",
+        r"\pm": "±",
+        r"\_": "_" # Fix mistakenly escaped underscores
+    }
+    
+    for latex_cmd, unicode_char in replacements.items():
+        text = text.replace(latex_cmd, unicode_char)
+        
+    return text
+
 # ─────────────────────────── Groq Client ────────────────────────────
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
-SYSTEM_PROMPT = """You are EduBot — an expert AI tutor specialising in Physics, Mathematics, Chemistry, Biology, Computer Science, and all academic subjects.
+SYSTEM_PROMPT = """You are EduBot — an expert AI tutor.
 
-CRITICAL FORMATTING GUIDELINES:
-- Give clear, step-by-step explanations suited to the student's level.
-- For maths/physics, ALWAYS show full working. 
-- You MUST use ONLY $...$ for inline equations and $$...$$ for display equations. Do NOT use \[ \] or \( \) under any circumstances.
-- Keep equations well-structured and use standard LaTeX.
-- When asked for diagrams, suggest a Wikimedia search term in the format: [DIAGRAM: <search term>]
-- When asked to generate a PDF, respond with your full answer and append: [GENERATE_PDF]
-- Keep answers well-structured with headings where appropriate.
+CRITICAL MATH FORMATTING RULES (STRICTLY ENFORCED):
+1. NEVER escape dollar signs. Write $5 \Omega$, NOT \$5 \Omega\$.
+2. ALL equations, numbers, and variables MUST be wrapped in $...$ (inline) or $$...$$ (display math). 
+3. NEVER write naked equations. Every single equation must have a delimiter.
+4. For complex fractions or large equations, ALWAYS use display math: $$...$$
+5. Give clear, step-by-step explanations suited to the student's level.
+6. When asked for diagrams, suggest a Wikimedia search term in the format: [DIAGRAM: <search term>]
+7. When asked to generate a PDF, respond with your full answer and append: [GENERATE_PDF]
+8. Keep answers well-structured with headings where appropriate.
 """
 
 # ─────────────────────────── Math Renderer ──────────────────────────
@@ -167,14 +198,11 @@ def render_latex_to_image(latex: str, dpi: int = 200) -> Optional[bytes]:
         plt.close("all")
         return None
 
-
 def extract_latex_blocks(text: str):
     """
-    Standardize delimiters and extract display math blocks ($$...$$) from text.
+    Extract display math blocks ($$...$$) from text.
     Returns list of (before_text, latex_expr, after_text) tuples.
     """
-    # Force convert common alternative block math delimiters to $$
-    text = text.replace("\\[", "$$").replace("\\]", "$$")
     parts = re.split(r"\$\$(.*?)\$\$", text, flags=re.DOTALL)
     return parts
 
@@ -263,7 +291,9 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
     story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#3949ab")))
     story.append(Spacer(1, 10))
 
-    parts = extract_latex_blocks(content)
+    # Clean the text before doing any PDF processing
+    clean_content = sanitize_latex_for_pdf(content)
+    parts = extract_latex_blocks(clean_content)
     
     for i, part in enumerate(parts):
         if i % 2 == 1:
@@ -302,10 +332,16 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
                 elif re.match(r"^\d+\. ", escaped_line):
                     # Handle bolding inside standard lines
                     bolded = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", escaped_line)
-                    story.append(Paragraph(bolded, style_body))
+                    processed = re.sub(r"\$([^$]+)\$",
+                                       lambda m: f"<font name='Courier' color='#1a237e'>{m.group(1)}</font>",
+                                       bolded)
+                    story.append(Paragraph(processed, style_body))
                 elif escaped_line.startswith("- ") or escaped_line.startswith("* "):
                     bolded = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", escaped_line[2:])
-                    story.append(Paragraph(f"• {bolded}", style_body))
+                    processed = re.sub(r"\$([^$]+)\$",
+                                       lambda m: f"<font name='Courier' color='#1a237e'>{m.group(1)}</font>",
+                                       bolded)
+                    story.append(Paragraph(f"• {processed}", style_body))
                 elif escaped_line.startswith("`") and escaped_line.endswith("`"):
                     story.append(Paragraph(f"<font name='Courier'>{escaped_line[1:-1]}</font>", style_code))
                 else:
