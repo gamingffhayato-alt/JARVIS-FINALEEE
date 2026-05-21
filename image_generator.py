@@ -22,11 +22,10 @@ async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
         safe_prompt = urllib.parse.quote(enhanced_prompt)
         
         # Pollinations AI generates images just by visiting a URL
-        # We set nologo=true to remove watermarks, and enhance=true for better prompt understanding
         url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=768&nologo=true&enhance=true"
         
-        # Give it a 30-second timeout as image generation can take a few seconds
-        async with httpx.AsyncClient(timeout=30) as client:
+        # FIX: Increased timeout to 60s and explicitly told httpx to follow redirects
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
             response = await client.get(url)
             
             # If the request was successful, return the image bytes
