@@ -12,7 +12,8 @@ logger = logging.getLogger("EduBot.ImageGen")
 
 async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
     """
-    Generate an educational diagram using FLUX.1-schnell via Cloudflare Workers AI.
+    Generate a labelled educational diagram using FLUX.1-schnell via Cloudflare Workers AI.
+    The prompt is carefully engineered to instruct the model to render correct, meaningful text labels.
     """
     cf_account_id = os.environ.get("CF_ACCOUNT_ID")
     cf_api_token = os.environ.get("CF_API_TOKEN")
@@ -31,8 +32,17 @@ async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
         "Content-Type": "application/json"
     }
 
-    # Enhance the prompt to ensure a clean, academic style
-    enhanced_prompt = f"A clear, educational textbook diagram, highly detailed, white background, clean labels. Subject: {prompt}"
+    # Prompt engineered to maximise correct, legible, meaningful label text output
+    enhanced_prompt = (
+        f"A highly detailed scientific textbook diagram of: {prompt}. "
+        "White background. "
+        "All parts must be labelled with their correct, real, meaningful scientific names written in clear black English text. "
+        "Each label must be spelled correctly and connected to the correct part with a thin straight line. "
+        "Use standard anatomical or scientific terminology. "
+        "Text must be sharp, legible, and properly spaced. "
+        "Do not use placeholder, random, or nonsense words for any label. "
+        "Style: academic illustration, clean lines, professional educational poster."
+    )
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -44,7 +54,6 @@ async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
 
             if response.status_code == 200:
                 result = response.json()
-                # Cloudflare returns base64-encoded image in result.image
                 image_b64 = result.get("result", {}).get("image")
                 if image_b64:
                     image_bytes = base64.b64decode(image_b64)
