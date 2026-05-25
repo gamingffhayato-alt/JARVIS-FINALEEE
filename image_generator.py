@@ -1,8 +1,7 @@
 """
-image_generator.py - Diagram Generator using Hugging Face (FLUX.1-schnell)
+image_generator.py - Diagram Generator using Cloudflare Workers AI (Stable Diffusion XL)
 """
 
-import os
 import logging
 from typing import Optional
 import httpx
@@ -11,18 +10,18 @@ logger = logging.getLogger("EduBot.ImageGen")
 
 async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
     """
-    Generate an educational diagram using FLUX.1-schnell via Hugging Face Inference API.
+    Generate an educational diagram using Stable Diffusion XL via Cloudflare Workers AI.
     """
-    # FLUX.1-schnell is exceptionally fast and great at generating text/labels
-    API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+    # Paste your credentials right here for testing
+    account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID" 
+    api_token = "YOUR_CLOUDFLARE_API_TOKEN"
     
-    hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
-        logger.error("HF_TOKEN is missing! Please add it to your environment variables.")
-        return None
+    # Using Stable Diffusion XL Base 1.0 on Cloudflare Workers AI
+    model = "@cf/stabilityai/stable-diffusion-xl-base-1.0"
+    api_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
 
     headers = {
-        "Authorization": f"Bearer {hf_token}",
+        "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/json"
     }
     
@@ -32,15 +31,15 @@ async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                API_URL, 
+                api_url, 
                 headers=headers, 
-                json={"inputs": enhanced_prompt}
+                json={"prompt": enhanced_prompt} 
             )
             
             if response.status_code == 200:
                 return response.content, prompt
             else:
-                logger.error(f"Hugging Face API Error {response.status_code}: {response.text}")
+                logger.error(f"Cloudflare API Error {response.status_code}: {response.text}")
                 
     except Exception as e:
         logger.error(f"Image generation failed for '{prompt}': {e}")
