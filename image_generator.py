@@ -1,4 +1,3 @@
-```python
 """
 image_generator.py - Diagram Generator
   1. Cloudflare AI (FLUX) generates a clean UNLABELLED illustration.
@@ -235,6 +234,3 @@ async def generate_diagram(prompt: str) -> Optional[tuple[bytes, str]]:
     except Exception as e:
         logger.error(f"Label overlay failed: {e}")
         return base_image, prompt
-
-
-```
