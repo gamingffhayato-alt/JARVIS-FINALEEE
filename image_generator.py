@@ -79,10 +79,18 @@ async def _get_labels(client: httpx.AsyncClient, topic: str) -> list[dict]:
 
 async def _generate_base_image(client: httpx.AsyncClient, topic: str) -> Optional[bytes]:
     """Generate an UNLABELLED illustration — explicitly no text."""
+    # Strip words that trigger the model to add its own garbled labels
+    import re as _re
+    clean_topic = _re.sub(
+        r'\b(diagram|label|labelled|labeled|labeling|annotated|with labels|chart)\b',
+        '', topic, flags=_re.IGNORECASE
+    ).strip()
+
     prompt = (
-        f"Detailed scientific illustration of {topic}. "
-        "Pure white background. Absolutely NO text, NO words, NO labels, NO letters anywhere in the image. "
-        "Clean anatomical drawing, high detail, academic textbook style."
+        f"Plain illustration of {clean_topic}, no text. "
+        "White background. "
+        "Render ZERO letters, ZERO words, ZERO numbers, ZERO annotations anywhere. "
+        "Just the drawing itself, nothing written."
     )
     resp = await client.post(
         _cf_url("@cf/black-forest-labs/flux-1-schnell"),
