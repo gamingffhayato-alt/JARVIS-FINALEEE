@@ -8,3 +8,6 @@ Pillow==10.4.0
 matplotlib==3.9.2
 reportlab==4.2.2
 google-genai
+cairosvg
+httpx
+Pillow
