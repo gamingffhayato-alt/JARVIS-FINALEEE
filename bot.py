@@ -19,17 +19,21 @@ import base64
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+from collections import OrderedDict
 
 import httpx
 from PIL import Image
 import matplotlib
-matplotlib.use("Agg")
 
 # Use Matplotlib's built-in math renderer (requires ZERO external TeX installations)
+matplotlib.use("Agg")
 matplotlib.rcParams['text.usetex'] = False
 matplotlib.rcParams['mathtext.fontset'] = 'cm'
 
-import matplotlib.pyplot as plt
+# UPGRADE 1: Use Object-Oriented Matplotlib API for Thread-Safety
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
@@ -62,6 +66,9 @@ GROQ_MODEL       = "meta-llama/llama-4-scout-17b-16e-instruct"
 WHISPER_MODEL    = "whisper-large-v3"
 MAX_TOKENS       = 4096
 
+# UPGRADE 4: Global HTTP Client for efficient error reporting
+http_client = httpx.AsyncClient(timeout=10)
+
 # ─────────────────────────── Logging ────────────────────────────────
 
 logging.basicConfig(
@@ -84,16 +91,15 @@ async def report_error(error: Exception, context_info: str = ""):
         f"<b>Traceback:</b>\n<pre>{tb[:2000]}</pre>"
     )
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(
-                f"https://api.telegram.org/bot{ERROR_BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id": ERROR_CHAT_ID,
-                    "text": message,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
-            )
+        await http_client.post(
+            f"https://api.telegram.org/bot{ERROR_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": ERROR_CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+        )
     except Exception as e:
         logger.error(f"Failed to send error report: {e}")
 
@@ -124,22 +130,27 @@ def escape_and_format_html(text: str) -> str:
     formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', escaped)
     return formatted
 
+# UPGRADE 5: Resilient HTML fallback
+async def send_html_chunk(message, chunk: str):
+    """Attempts to send HTML text. Falls back to plain text if Telegram rejects parsing."""
+    try:
+        await message.reply_text(chunk, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.warning(f"HTML parsing failed, falling back to plain text: {e}")
+        # Strip simple HTML tags and unescape to deliver plain content safely
+        plain_chunk = re.sub(r'<[^>]+>', '', chunk)
+        plain_chunk = html.unescape(plain_chunk)
+        await message.reply_text(plain_chunk)
+
 def sanitize_latex_for_pdf(text: str) -> str:
-    # Safely convert double backslashes before letters to single backslashes
     text = re.sub(r"\\\\([a-zA-Z])", r"\\\1", text)
-    
     text = text.replace(r"\$", "$")
     text = text.replace(r"\(", "$").replace(r"\)", "$")
     text = text.replace(r"\[", "$$").replace(r"\]", "$$")
-    
-    # Strip unsupported LaTeX environments that break mathtext
     text = re.sub(r"\\begin\{[a-zA-Z*]+\}", "", text)
     text = re.sub(r"\\end\{[a-zA-Z*]+\}", "", text)
-    
-    # Strip unsupported \boxed command and convert \text to \mathrm
     text = re.sub(r"\\boxed\{(.*?)\}", r"\1", text)
     text = re.sub(r"\\text\{(.*?)\}", r"\\mathrm{\1}", text)
-    
     return text
 
 # ─────────────────────────── Groq Client ────────────────────────────
@@ -163,27 +174,28 @@ CRITICAL MATH FORMATTING & REASONING RULES:
 # ─────────────────────────── Math Renderer ──────────────────────────
 
 def render_math_to_image(latex: str, dpi: int = 150, inline: bool = False) -> Optional[tuple[bytes, float, float]]:
-    """Renders LaTeX to PNG using built-in mathtext. Returns (bytes, width_pt, height_pt)."""
+    """Renders LaTeX to PNG using built-in mathtext via Thread-Safe Object-Oriented API."""
     try:
-        fig = plt.figure(figsize=(0.01, 0.01))
-        fig.patch.set_facecolor("white")
+        fig = Figure(figsize=(0.01, 0.01), facecolor="white")
+        canvas = FigureCanvasAgg(fig)
         
         expr = latex.strip()
         if not expr.startswith("$"):
             expr = f"${expr}$"
             
         fontsize = 12 if inline else 16
-        t = fig.text(0, 0, expr, fontsize=fontsize, color="black")
+        fig.text(0, 0, expr, fontsize=fontsize, color="black")
+        
+        # Calculate bounding box
+        canvas.draw()
         
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", pad_inches=0.03, facecolor="white")
-        plt.close(fig)
+        fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", pad_inches=0.03, facecolor="white")
         buf.seek(0)
         
         img_bytes = buf.read()
         with Image.open(io.BytesIO(img_bytes)) as img:
             w_px, h_px = img.size
-            # Convert pixels at current DPI to ReportLab points (72 pts per inch)
             scale = 1.05 if inline else 1.2
             w_pt = (w_px / dpi) * 72 * scale
             h_pt = (h_px / dpi) * 72 * scale
@@ -191,7 +203,6 @@ def render_math_to_image(latex: str, dpi: int = 150, inline: bool = False) -> Op
         return img_bytes, w_pt, h_pt
     except Exception as e:
         logger.warning(f"Mathtext render failed for '{latex[:60]}': {e}")
-        plt.close("all")
         return None
 
 def extract_latex_blocks(text: str):
@@ -224,7 +235,6 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
             math_store.append(m.group(1))
             return f"__MATH_{len(math_store)-1}__"
             
-        # Isolate math so it doesn't get ruined by html.escape
         text = re.sub(r"\$([^$]+)\$", store_math, text)
         text = html.escape(text)
         text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
@@ -240,7 +250,6 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
                 tmp.flush()
                 temp_files.append(tmp.name)
                 tmp.close()
-                # Use negative valign to align image nicely with text baseline
                 return f'<img src="{tmp.name}" width="{w}" height="{h}" valign="{-h*0.2}"/>'
             else:
                 return f"<font name='Courier' color='#1a237e'>{html.escape(latex)}</font>"
@@ -258,7 +267,6 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
         
         for i, part in enumerate(parts):
             if i % 2 == 1:
-                # Display block math
                 res = render_math_to_image(part, inline=False)
                 if res:
                     img_b, w, h = res
@@ -274,7 +282,6 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
                 else:
                     story.append(Paragraph(f"<font name='Courier'>{html.escape(part)}</font>", style_code))
             else:
-                # Text processing
                 lines = part.split("\n")
                 for line in lines:
                     line = line.strip()
@@ -373,7 +380,18 @@ async def ask_groq_vision(image_bytes: bytes, prompt: str, mime: str = "image/jp
 
 # ─────────────────────────── Conversation Store ─────────────────────
 
-conversation_history: dict[int, list] = {}
+# UPGRADE 2: LRU Dictionary to manage memory footprint
+class MaxSizeDict(OrderedDict):
+    def __init__(self, max_size=500, *args, **kwargs):
+        self.max_size = max_size
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.max_size:
+            self.popitem(last=False)
+
+conversation_history = MaxSizeDict(max_size=500)
 
 def get_history(user_id: int) -> list:
     if user_id not in conversation_history:
@@ -406,7 +424,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"/clear — clear chat history\n"
         f"/help — show this message"
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    await send_html_chunk(update.message, msg)
 
 
 @error_guard("help")
@@ -451,7 +469,7 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_diagram(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = " ".join(ctx.args) if ctx.args else ""
     if not query:
-        await update.message.reply_text("Usage: /diagram &lt;prompt&gt;\nExample: /diagram A detailed cross-section of a plant cell", parse_mode=ParseMode.HTML)
+        await send_html_chunk(update.message, "Usage: /diagram &lt;prompt&gt;\nExample: /diagram A detailed cross-section of a plant cell")
         return
         
     await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
@@ -464,7 +482,7 @@ async def cmd_diagram(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
         )
     else:
-        await update.message.reply_text(f"❌ Failed to generate diagram for '{escape_and_format_html(query)}'.", parse_mode=ParseMode.HTML)
+        await send_html_chunk(update.message, f"❌ Failed to generate diagram for '{escape_and_format_html(query)}'.")
 
 
 @error_guard("text_message")
@@ -489,12 +507,15 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     formatted_text = escape_and_format_html(display_text)
     chunks = [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]
     for chunk in chunks:
-        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        await send_html_chunk(update.message, chunk)
 
+    # UPGRADE 3: Collect diagram data ONCE to avoid duplicate generation API calls
+    diagram_data = []
     for tag in diagram_tags:
         await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
         result = await generate_diagram(tag)
         if result:
+            diagram_data.append(result)
             img_bytes, caption = result
             await update.message.reply_photo(
                 photo=InputFile(io.BytesIO(img_bytes), filename="diagram.png"),
@@ -504,12 +525,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if generate_pdf:
         await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
-        diagram_data = []
-        for tag in diagram_tags:
-            result = await generate_diagram(tag)
-            if result:
-                diagram_data.append(result)
         title = (user_text[:60] + "...") if len(user_text) > 60 else user_text
+        # Pass the pre-generated diagram_data directly into the PDF builder
         pdf_bytes = build_pdf(title, clean_response, diagram_data)
         await update.message.reply_document(
             document=InputFile(io.BytesIO(pdf_bytes), filename="EduBot_Notes.pdf"),
@@ -539,21 +556,25 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     formatted_text = escape_and_format_html(display_text)
     chunks = [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]
     for chunk in chunks:
-        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        await send_html_chunk(update.message, chunk)
 
+    # UPGRADE 3 applied here as well
+    diagram_data = []
     for tag in diagram_tags:
+        await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
         result = await generate_diagram(tag)
         if result:
+            diagram_data.append(result)
             img_bytes2, caption2 = result
             await update.message.reply_photo(
                 photo=InputFile(io.BytesIO(img_bytes2), filename="diagram.png"),
-                caption=f"📊 {escape_and_format_html(caption2)} (Nano Banana AI)",
+                caption=f"📊 <b>{escape_and_format_html(caption2)}</b> (Nano Banana AI)",
                 parse_mode=ParseMode.HTML,
             )
 
     if "[GENERATE_PDF]" in response_text:
         title = (caption[:60] + "...") if caption else "Image Analysis"
-        pdf_bytes = build_pdf(title, clean_response, [])
+        pdf_bytes = build_pdf(title, clean_response, diagram_data)
         await update.message.reply_document(
             document=InputFile(io.BytesIO(pdf_bytes), filename="EduBot_Notes.pdf"),
             caption="📄 PDF notes generated!"
@@ -581,7 +602,7 @@ async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Could not transcribe the audio. Please try again.")
         return
 
-    await update.message.reply_text(f"📝 <b>Transcribed:</b> {escape_and_format_html(transcript)}", parse_mode=ParseMode.HTML)
+    await send_html_chunk(update.message, f"📝 <b>Transcribed:</b> {escape_and_format_html(transcript)}")
     await update.message.chat.send_action(ChatAction.TYPING)
 
     add_message(uid, "user", transcript)
@@ -596,21 +617,25 @@ async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     formatted_text = escape_and_format_html(display_text)
     chunks = [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]
     for chunk in chunks:
-        await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        await send_html_chunk(update.message, chunk)
 
+    # UPGRADE 3 applied here
+    diagram_data = []
     for tag in diagram_tags:
+        await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
         result = await generate_diagram(tag)
         if result:
+            diagram_data.append(result)
             img_bytes2, caption2 = result
             await update.message.reply_photo(
                 photo=InputFile(io.BytesIO(img_bytes2), filename="diagram.png"),
-                caption=f"📊 {escape_and_format_html(caption2)} (Nano Banana AI)",
+                caption=f"📊 <b>{escape_and_format_html(caption2)}</b> (Nano Banana AI)",
                 parse_mode=ParseMode.HTML,
             )
 
     if "[GENERATE_PDF]" in response_text:
         title = (transcript[:60] + "...") if len(transcript) > 60 else transcript
-        pdf_bytes = build_pdf(title, clean_response, [])
+        pdf_bytes = build_pdf(title, clean_response, diagram_data)
         await update.message.reply_document(
             document=InputFile(io.BytesIO(pdf_bytes), filename="EduBot_Notes.pdf"),
             caption="📄 PDF notes ready!"
@@ -636,7 +661,7 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         formatted_text = escape_and_format_html(clean)
         
         for chunk in [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]:
-            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+            await send_html_chunk(update.message, chunk)
     else:
         await update.message.reply_text(
             "📁 I can process image files. For PDFs or text files, "
