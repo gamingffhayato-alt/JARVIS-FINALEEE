@@ -1,5 +1,5 @@
 """
-EduBot - AI-Powered Education Telegram Bot
+EduBot (JARVIS) - AI-Powered Education Telegram Bot
 Uses Groq API (Llama 4 Scout) for AI, supports text/image/audio input,
 generates PDFs with rendered math/physics, generates Nano Banana diagrams.
 Errors are forwarded to a separate error-reporting bot.
@@ -30,7 +30,7 @@ matplotlib.use("Agg")
 matplotlib.rcParams['text.usetex'] = False
 matplotlib.rcParams['mathtext.fontset'] = 'cm'
 
-# UPGRADE 1: Use Object-Oriented Matplotlib API for Thread-Safety
+# Thread-Safe Object-Oriented API
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
@@ -44,7 +44,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
 
-from telegram import Update, InputFile
+from telegram import Update, InputFile, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     ContextTypes, filters
@@ -66,7 +66,9 @@ GROQ_MODEL       = "meta-llama/llama-4-scout-17b-16e-instruct"
 WHISPER_MODEL    = "whisper-large-v3"
 MAX_TOKENS       = 4096
 
-# UPGRADE 4: Global HTTP Client for efficient error reporting
+ADMIN_ID         = "@johny8901"
+
+# Global HTTP Client for efficient error reporting
 http_client = httpx.AsyncClient(timeout=10)
 
 # ─────────────────────────── Logging ────────────────────────────────
@@ -130,14 +132,12 @@ def escape_and_format_html(text: str) -> str:
     formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', escaped)
     return formatted
 
-# UPGRADE 5: Resilient HTML fallback
 async def send_html_chunk(message, chunk: str):
     """Attempts to send HTML text. Falls back to plain text if Telegram rejects parsing."""
     try:
         await message.reply_text(chunk, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.warning(f"HTML parsing failed, falling back to plain text: {e}")
-        # Strip simple HTML tags and unescape to deliver plain content safely
         plain_chunk = re.sub(r'<[^>]+>', '', chunk)
         plain_chunk = html.unescape(plain_chunk)
         await message.reply_text(plain_chunk)
@@ -174,7 +174,6 @@ CRITICAL MATH FORMATTING & REASONING RULES:
 # ─────────────────────────── Math Renderer ──────────────────────────
 
 def render_math_to_image(latex: str, dpi: int = 150, inline: bool = False) -> Optional[tuple[bytes, float, float]]:
-    """Renders LaTeX to PNG using built-in mathtext via Thread-Safe Object-Oriented API."""
     try:
         fig = Figure(figsize=(0.01, 0.01), facecolor="white")
         canvas = FigureCanvasAgg(fig)
@@ -186,7 +185,6 @@ def render_math_to_image(latex: str, dpi: int = 150, inline: bool = False) -> Op
         fontsize = 12 if inline else 16
         fig.text(0, 0, expr, fontsize=fontsize, color="black")
         
-        # Calculate bounding box
         canvas.draw()
         
         buf = io.BytesIO()
@@ -380,7 +378,6 @@ async def ask_groq_vision(image_bytes: bytes, prompt: str, mime: str = "image/jp
 
 # ─────────────────────────── Conversation Store ─────────────────────
 
-# UPGRADE 2: LRU Dictionary to manage memory footprint
 class MaxSizeDict(OrderedDict):
     def __init__(self, max_size=500, *args, **kwargs):
         self.max_size = max_size
@@ -421,22 +418,26 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Commands:\n"
         f"/pdf — convert last answer to PDF\n"
         f"/diagram &lt;prompt&gt; — generate an AI diagram\n"
-        f"/clear — clear chat history\n"
-        f"/help — show this message"
+        f"/reset — clear memory & start fresh\n"
+        f"/help — contact the admin"
     )
     await send_html_chunk(update.message, msg)
 
 
 @error_guard("help")
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await cmd_start(update, ctx)
+    msg = (
+        f"🆘 Need help, have feedback, or want to report an issue?\n\n"
+        f"<b>Contact the Admin:</b> {ADMIN_ID}"
+    )
+    await send_html_chunk(update.message, msg)
 
 
-@error_guard("clear")
-async def cmd_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+@error_guard("reset")
+async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     conversation_history.pop(uid, None)
-    await update.message.reply_text("🗑️ Conversation history cleared. Fresh start!")
+    await update.message.reply_text("🔄 Memory cleared. Let's start fresh!")
 
 
 @error_guard("pdf_command")
@@ -509,7 +510,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for chunk in chunks:
         await send_html_chunk(update.message, chunk)
 
-    # UPGRADE 3: Collect diagram data ONCE to avoid duplicate generation API calls
     diagram_data = []
     for tag in diagram_tags:
         await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
@@ -526,7 +526,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if generate_pdf:
         await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
         title = (user_text[:60] + "...") if len(user_text) > 60 else user_text
-        # Pass the pre-generated diagram_data directly into the PDF builder
         pdf_bytes = build_pdf(title, clean_response, diagram_data)
         await update.message.reply_document(
             document=InputFile(io.BytesIO(pdf_bytes), filename="EduBot_Notes.pdf"),
@@ -558,7 +557,6 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for chunk in chunks:
         await send_html_chunk(update.message, chunk)
 
-    # UPGRADE 3 applied here as well
     diagram_data = []
     for tag in diagram_tags:
         await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
@@ -619,7 +617,6 @@ async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for chunk in chunks:
         await send_html_chunk(update.message, chunk)
 
-    # UPGRADE 3 applied here
     diagram_data = []
     for tag in diagram_tags:
         await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
@@ -674,15 +671,31 @@ async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Unhandled error: {exc}")
     await report_error(exc, f"global_error_handler | update={type(update).__name__}")
 
+
+# ─────────────────────────── Bot Initialization ─────────────────────────
+
+async def setup_bot_commands(application: Application):
+    """Sets up the Telegram bot menu commands to match the JARVIS theme."""
+    commands = [
+        BotCommand("start", "Wake up JARVIS ⚡️"),
+        BotCommand("reset", "Clear memory & start fresh 🔄"),
+        BotCommand("help", "Contact the Admin 🆘"),
+        BotCommand("pdf", "Convert last answer to PDF 📄"),
+        BotCommand("diagram", "Generate an AI diagram 📊")
+    ]
+    await application.bot.set_my_commands(commands)
+
+
 # ─────────────────────────── Main ───────────────────────────────────
 
 def main():
     logger.info("Starting EduBot...")
-    app = Application.builder().token(BOT_TOKEN).build()
+    # The post_init step ensures your custom menu applies when the bot boots up
+    app = Application.builder().token(BOT_TOKEN).post_init(setup_bot_commands).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help",  cmd_help))
-    app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("reset", cmd_reset))  # Replaced cmd_clear with cmd_reset
     app.add_handler(CommandHandler("pdf",   cmd_pdf))
     app.add_handler(CommandHandler("diagram", cmd_diagram))
 
