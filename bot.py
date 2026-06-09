@@ -157,18 +157,18 @@ def sanitize_latex_for_pdf(text: str) -> str:
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
+# Diagram generation tags removed from system prompt completely
 SYSTEM_PROMPT = """You are EduBot — an expert AI tutor.
 
 CRITICAL MATH FORMATTING & REASONING RULES:
 1. NEVER escape dollar signs. Write $5 \Omega$, NOT \$5 \Omega\$.
 2. ALL equations, numbers, and variables MUST be wrapped in $...$ (inline) or $$...$$ (display math). 
 3. NEVER write naked equations. Every single equation must have a delimiter.
-4. DO NOT use complex LaTeX environments like \begin{vmatrix}, \begin{matrix}, \begin{array}, \begin{align}, etc.
-5. For cross products and determinants, DO NOT draw a matrix. Write the algebraic expansion linearly. Example: $\vec{A} \times \vec{B} = (A_y B_z - A_z B_y)\hat{i} - ...$
-6. DO NOT use \boxed{} or \text{} as they break the renderer. Use simple, basic LaTeX equations. Use \mathrm{} instead of \text{}.
+4. DO NOT use complex LaTeX environments like \\begin{vmatrix}, \\begin{matrix}, \\begin{array}, \\begin{align}, etc.
+5. For cross products and determinants, DO NOT draw a matrix. Write the algebraic expansion linearly. Example: $\\vec{A} \\times \\vec{B} = (A_y B_z - A_z B_y)\\hat{i} - ...$
+6. DO NOT use \\boxed{} or \\text{} as they break the renderer. Use simple, basic LaTeX equations. Use \\mathrm{} instead of \\text{}.
 7. Think step-by-step and DOUBLE-CHECK algebraic manipulations. ALWAYS convert units to standard SI (e.g., mA to A) before solving equations.
-8. When asked for diagrams, suggest a detailed visual prompt for an AI image generator: [DIAGRAM: <detailed visual prompt>]
-9. To generate a PDF, append: [GENERATE_PDF]
+8. To generate a PDF, append: [GENERATE_PDF]
 """
 
 # ─────────────────────────── Math Renderer ──────────────────────────
@@ -453,13 +453,8 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     question = next((m["content"] for m in reversed(history) if m["role"] == "user"), "Answer")
     title = (question[:60] + "...") if len(question) > 60 else question
     
-    diagram_data = []
-    for tag in re.findall(r"\[DIAGRAM:\s*(.+?)\]", last_answer):
-        result = await generate_diagram(tag)
-        if result:
-            diagram_data.append(result)
-            
-    pdf_bytes = build_pdf(title, last_answer, diagram_data)
+    # Send PDF without diagrams (since conversational tags are disabled)
+    pdf_bytes = build_pdf(title, last_answer, [])
     await update.message.reply_document(
         document=InputFile(io.BytesIO(pdf_bytes), filename="EduBot_Notes.pdf"),
         caption="📄 Here are your notes as a PDF!"
@@ -502,31 +497,15 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     generate_pdf = "[GENERATE_PDF]" in response_text
     clean_response = response_text.replace("[GENERATE_PDF]", "").strip()
 
-    diagram_tags = re.findall(r"\[DIAGRAM:\s*(.+?)\]", clean_response)
-    display_text = re.sub(r"\[DIAGRAM:\s*.+?\]", "", clean_response).strip()
-
-    formatted_text = escape_and_format_html(display_text)
+    formatted_text = escape_and_format_html(clean_response)
     chunks = [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]
     for chunk in chunks:
         await send_html_chunk(update.message, chunk)
 
-    diagram_data = []
-    for tag in diagram_tags:
-        await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
-        result = await generate_diagram(tag)
-        if result:
-            diagram_data.append(result)
-            img_bytes, caption = result
-            await update.message.reply_photo(
-                photo=InputFile(io.BytesIO(img_bytes), filename="diagram.png"),
-                caption=f"📊 <b>{escape_and_format_html(caption)}</b> (Nano Banana AI)",
-                parse_mode=ParseMode.HTML,
-            )
-
     if generate_pdf:
         await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
         title = (user_text[:60] + "...") if len(user_text) > 60 else user_text
-        pdf_bytes = build_pdf(title, clean_response, diagram_data)
+        pdf_bytes = build_pdf(title, clean_response, [])
         await update.message.reply_document(
             document=InputFile(io.BytesIO(pdf_bytes), filename="EduBot_Notes.pdf"),
             caption="📄 Your PDF notes are ready!"
@@ -549,30 +528,15 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     add_message(uid, "assistant", response_text)
 
     clean_response = response_text.replace("[GENERATE_PDF]", "").strip()
-    diagram_tags = re.findall(r"\[DIAGRAM:\s*(.+?)\]", clean_response)
-    display_text = re.sub(r"\[DIAGRAM:\s*.+?\]", "", clean_response).strip()
 
-    formatted_text = escape_and_format_html(display_text)
+    formatted_text = escape_and_format_html(clean_response)
     chunks = [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]
     for chunk in chunks:
         await send_html_chunk(update.message, chunk)
 
-    diagram_data = []
-    for tag in diagram_tags:
-        await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
-        result = await generate_diagram(tag)
-        if result:
-            diagram_data.append(result)
-            img_bytes2, caption2 = result
-            await update.message.reply_photo(
-                photo=InputFile(io.BytesIO(img_bytes2), filename="diagram.png"),
-                caption=f"📊 <b>{escape_and_format_html(caption2)}</b> (Nano Banana AI)",
-                parse_mode=ParseMode.HTML,
-            )
-
     if "[GENERATE_PDF]" in response_text:
         title = (caption[:60] + "...") if caption else "Image Analysis"
-        pdf_bytes = build_pdf(title, clean_response, diagram_data)
+        pdf_bytes = build_pdf(title, clean_response, [])
         await update.message.reply_document(
             document=InputFile(io.BytesIO(pdf_bytes), filename="EduBot_Notes.pdf"),
             caption="📄 PDF notes generated!"
@@ -609,30 +573,15 @@ async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     add_message(uid, "assistant", response_text)
 
     clean_response = response_text.replace("[GENERATE_PDF]", "").strip()
-    diagram_tags = re.findall(r"\[DIAGRAM:\s*(.+?)\]", clean_response)
-    display_text = re.sub(r"\[DIAGRAM:\s*.+?\]", "", clean_response).strip()
 
-    formatted_text = escape_and_format_html(display_text)
+    formatted_text = escape_and_format_html(clean_response)
     chunks = [formatted_text[i:i+4000] for i in range(0, len(formatted_text), 4000)]
     for chunk in chunks:
         await send_html_chunk(update.message, chunk)
 
-    diagram_data = []
-    for tag in diagram_tags:
-        await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
-        result = await generate_diagram(tag)
-        if result:
-            diagram_data.append(result)
-            img_bytes2, caption2 = result
-            await update.message.reply_photo(
-                photo=InputFile(io.BytesIO(img_bytes2), filename="diagram.png"),
-                caption=f"📊 <b>{escape_and_format_html(caption2)}</b> (Nano Banana AI)",
-                parse_mode=ParseMode.HTML,
-            )
-
     if "[GENERATE_PDF]" in response_text:
         title = (transcript[:60] + "...") if len(transcript) > 60 else transcript
-        pdf_bytes = build_pdf(title, clean_response, diagram_data)
+        pdf_bytes = build_pdf(title, clean_response, [])
         await update.message.reply_document(
             document=InputFile(io.BytesIO(pdf_bytes), filename="EduBot_Notes.pdf"),
             caption="📄 PDF notes ready!"
@@ -695,7 +644,7 @@ def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help",  cmd_help))
-    app.add_handler(CommandHandler("reset", cmd_reset))  # Replaced cmd_clear with cmd_reset
+    app.add_handler(CommandHandler("reset", cmd_reset))  
     app.add_handler(CommandHandler("pdf",   cmd_pdf))
     app.add_handler(CommandHandler("diagram", cmd_diagram))
 
