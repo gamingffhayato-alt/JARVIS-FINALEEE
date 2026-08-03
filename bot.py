@@ -25,6 +25,13 @@ from typing import Optional
 from collections import OrderedDict
 from functools import wraps
 
+# Safely load local .env file if it exists (for local testing)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # Ignored on Railway where environment variables are injected directly
+
 import httpx
 from PIL import Image
 import matplotlib
@@ -66,10 +73,10 @@ from image_generator import generate_diagram
 
 # ─────────────────────────── Configuration ───────────────────────────
 
-BOT_TOKEN        = os.environ["TELEGRAM_BOT_TOKEN"]
-ERROR_BOT_TOKEN  = os.environ["TELEGRAM_ERROR_BOT_TOKEN"]
-ERROR_CHAT_ID    = os.environ["TELEGRAM_ERROR_CHAT_ID"]
-GROQ_API_KEY     = os.environ["GROQ_API_KEY"]
+BOT_TOKEN        = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+ERROR_BOT_TOKEN  = os.environ.get("TELEGRAM_ERROR_BOT_TOKEN", "")
+ERROR_CHAT_ID    = os.environ.get("TELEGRAM_ERROR_CHAT_ID", "")
+GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
 
 GROQ_MODEL       = "llama-3.1-8b-instant"
 WHISPER_MODEL    = "whisper-large-v3"
@@ -595,6 +602,13 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await send_html_chunk(update.message, msg)
 
 
+@error_guard("test_crash")
+async def cmd_crash(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Hidden command to test if the Error Analyser bot is working properly."""
+    await update.message.reply_text("🚨 Initiating test crash! Check the Error Analyser bot.")
+    1 / 0  # This purposefully raises a ZeroDivisionError to test the error reporter
+
+
 @error_guard("reset")
 async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -826,6 +840,7 @@ def main():
     app.add_handler(CommandHandler("help",  cmd_help))
     app.add_handler(CommandHandler("reset", cmd_reset))  
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("crash", cmd_crash)) # Hidden test command
     app.add_handler(CommandHandler("pdf",   cmd_pdf))
     app.add_handler(CommandHandler("diagram", cmd_diagram))
 
