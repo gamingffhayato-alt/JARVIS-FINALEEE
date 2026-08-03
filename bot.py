@@ -94,7 +94,7 @@ async def report_error(error: Exception, context_info: str = ""):
     )
     try:
         await http_client.post(
-            f"https://api.telegram.org/bot{ERROR_BOT_TOKEN}/sendMessage",
+            f"https://api.telegram.org/bot{TELEGRAM_ERROR_BOT_TOKEN}/sendMessage",
             json={
                 "chat_id": ERROR_CHAT_ID,
                 "text": message,
