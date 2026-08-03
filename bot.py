@@ -1,7 +1,8 @@
 """
 EduBot (JARVIS) - AI-Powered Education Telegram Bot
 Uses Groq API (Llama 4 Scout) for AI, supports text/image/audio input,
-generates PDFs with rendered math/physics, generates Nano Banana diagrams.
+generates PDFs with rendered math/physics and code syntax highlighting, 
+generates Nano Banana diagrams.
 Errors are forwarded to a separate error-reporting bot.
 """
 
@@ -11,19 +12,27 @@ import re
 import sys
 import json
 import html
+import time
 import logging
 import asyncio
 import tempfile
+import threading
 import traceback
 import base64
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 from collections import OrderedDict
+from functools import wraps
 
 import httpx
 from PIL import Image
 import matplotlib
+
+# Pygments for syntax highlighting in PDFs
+from pygments import highlight
+from pygments.lexers import get_lexer_by_name, guess_lexer
+from pygments.formatters import ImageFormatter
 
 # Use Matplotlib's built-in math renderer (requires ZERO external TeX installations)
 matplotlib.use("Agg")
@@ -80,21 +89,75 @@ logging.basicConfig(
 )
 logger = logging.getLogger("EduBot")
 
+# ─────────────────────────── Token Bucket Rate Limiter ──────────────
+
+class TokenBucket:
+    def __init__(self, max_tokens: int, refill_rate: float, interval: float):
+        self.max_tokens = max_tokens
+        self.tokens = max_tokens
+        self.refill_rate = refill_rate
+        self.interval = interval
+        self.last_refill = time.time()
+        self.lock = threading.Lock()
+
+    def allow_request(self) -> bool:
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_refill
+            if elapsed > self.interval:
+                tokens_to_add = (elapsed / self.interval) * self.refill_rate
+                self.tokens = min(self.max_tokens, self.tokens + tokens_to_add)
+                self.last_refill = now
+            
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return True
+            return False
+
+user_limiters = {}
+
+def rate_limit(max_tokens=5, refill_rate=1, interval=10):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            user = update.effective_user
+            if not user:
+                return await func(update, context, *args, **kwargs)
+
+            # Admins bypass rate limit
+            if user.username and f"@{user.username}" == ADMIN_ID:
+                 return await func(update, context, *args, **kwargs)
+
+            user_id = user.id
+            if user_id not in user_limiters:
+                user_limiters[user_id] = TokenBucket(max_tokens, refill_rate, interval)
+            
+            if not user_limiters[user_id].allow_request():
+                await update.message.reply_text("⏳ You are sending messages too quickly. Please wait a moment.")
+                return 
+                
+            return await func(update, context, *args, **kwargs)
+        return wrapper
+    return decorator
+
 # ─────────────────────────── Error Reporter ─────────────────────────
 
 async def report_error(error: Exception, context_info: str = ""):
     tb = traceback.format_exc()
+    escaped_tb = html.escape(tb) # Fixes the <module> tag crashing Telegram
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    
     message = (
         f"🚨 <b>EduBot Error</b>\n"
         f"<b>Time:</b> {timestamp}\n"
         f"<b>Context:</b> {context_info or 'N/A'}\n"
-        f"<b>Error:</b> <code>{type(error).__name__}: {str(error)[:300]}</code>\n\n"
-        f"<b>Traceback:</b>\n<pre>{tb[:2000]}</pre>"
+        f"<b>Error:</b> <code>{type(error).__name__}: {html.escape(str(error))[:300]}</code>\n\n"
+        f"<b>Traceback:</b>\n<pre>{escaped_tb[:2000]}</pre>"
     )
+    
     try:
-        await http_client.post(
-            f"https://api.telegram.org/bot{TELEGRAM_ERROR_BOT_TOKEN}/sendMessage",
+        response = await http_client.post(
+            f"[https://api.telegram.org/bot](https://api.telegram.org/bot){ERROR_BOT_TOKEN}/sendMessage",
             json={
                 "chat_id": ERROR_CHAT_ID,
                 "text": message,
@@ -102,12 +165,16 @@ async def report_error(error: Exception, context_info: str = ""):
                 "disable_web_page_preview": True,
             },
         )
+        # Log if Telegram rejects the request (e.g., bot blocked or chat not started)
+        if response.status_code != 200:
+            logger.error(f"Error Bot failed to send message! Status: {response.status_code}, Response: {response.text}")
     except Exception as e:
-        logger.error(f"Failed to send error report: {e}")
+        logger.error(f"Network failure sending error report: {e}")
 
 
 def error_guard(context_label: str = ""):
     def decorator(func):
+        @wraps(func)
         async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
             try:
                 return await func(update, ctx, *args, **kwargs)
@@ -167,21 +234,21 @@ def sanitize_latex_for_pdf(text: str) -> str:
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
-# Diagram generation tags removed from system prompt completely
-SYSTEM_PROMPT = """You are EduBot — an expert AI tutor.
+# Use raw string r"""...""" to fix \Omega escape sequence warning
+SYSTEM_PROMPT = r"""You are EduBot — an expert AI tutor.
 
 CRITICAL MATH FORMATTING & REASONING RULES:
 1. NEVER escape dollar signs. Write $5 \Omega$, NOT \$5 \Omega\$.
 2. ALL equations, numbers, and variables MUST be wrapped in $...$ (inline) or $$...$$ (display math). 
 3. NEVER write naked equations. Every single equation must have a delimiter.
-4. DO NOT use complex LaTeX environments like \\begin{vmatrix}, \\begin{matrix}, \\begin{array}, \\begin{align}, etc.
-5. For cross products and determinants, DO NOT draw a matrix. Write the algebraic expansion linearly. Example: $\\vec{A} \\times \\vec{B} = (A_y B_z - A_z B_y)\\hat{i} - ...$
-6. DO NOT use \\boxed{} or \\text{} as they break the renderer. Use simple, basic LaTeX equations. Use \\mathrm{} instead of \\text{}.
+4. DO NOT use complex LaTeX environments like \begin{vmatrix}, \begin{matrix}, \begin{array}, \begin{align}, etc.
+5. For cross products and determinants, DO NOT draw a matrix. Write the algebraic expansion linearly. Example: $\vec{A} \times \vec{B} = (A_y B_z - A_z B_y)\hat{i} - ...$
+6. DO NOT use \boxed{} or \text{} as they break the renderer. Use simple, basic LaTeX equations. Use \mathrm{} instead of \text{}.
 7. Think step-by-step and DOUBLE-CHECK algebraic manipulations. ALWAYS convert units to standard SI (e.g., mA to A) before solving equations.
 8. To generate a PDF, append: [GENERATE_PDF]
 """
 
-# ─────────────────────────── Math Renderer ──────────────────────────
+# ─────────────────────────── Math & Code Renderers ──────────────────
 
 def render_math_to_image(latex: str, dpi: int = 150, inline: bool = False) -> Optional[tuple[bytes, float, float]]:
     try:
@@ -211,6 +278,27 @@ def render_math_to_image(latex: str, dpi: int = 150, inline: bool = False) -> Op
         return img_bytes, w_pt, h_pt
     except Exception as e:
         logger.warning(f"Mathtext render failed for '{latex[:60]}': {e}")
+        return None
+
+def render_code_to_image(code_text: str, language: str = None) -> Optional[tuple[bytes, float, float]]:
+    """Renders a code block to a syntax-highlighted image using Pygments."""
+    try:
+        try:
+            lexer = get_lexer_by_name(language, stripall=True) if language else guess_lexer(code_text)
+        except Exception:
+            lexer = get_lexer_by_name("text", stripall=True)
+            
+        formatter = ImageFormatter(font_size=16, line_numbers=False, style="monokai")
+        img_bytes = highlight(code_text, lexer, formatter)
+        
+        with Image.open(io.BytesIO(img_bytes)) as img:
+            w_px, h_px = img.size
+            # Convert pixels to points (assuming roughly 96 DPI output from Pygments)
+            w_pt = w_px * 0.75
+            h_pt = h_px * 0.75
+        return img_bytes, w_pt, h_pt
+    except Exception as e:
+        logger.warning(f"Pygments render failed: {e}")
         return None
 
 def extract_latex_blocks(text: str):
@@ -271,6 +359,17 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
         story.append(Spacer(1, 10))
 
         clean_content = sanitize_latex_for_pdf(content)
+        
+        # Extract Multi-line code blocks before splitting by newline
+        code_store = []
+        def extract_code(m):
+            lang = m.group(1)
+            code = m.group(2)
+            code_store.append((lang, code))
+            return f"\n__CODE_{len(code_store)-1}__\n"
+            
+        clean_content = re.sub(r"```(\w*)\n(.*?)```", extract_code, clean_content, flags=re.DOTALL)
+
         parts = extract_latex_blocks(clean_content)
         
         for i, part in enumerate(parts):
@@ -295,6 +394,36 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
                     line = line.strip()
                     if not line:
                         story.append(Spacer(1, 4))
+                        continue
+                    
+                    # Handle Pygments Syntax Highlighted Blocks
+                    code_match = re.match(r"__CODE_(\d+)__", line)
+                    if code_match:
+                        idx = int(code_match.group(1))
+                        lang, code = code_store[idx]
+                        res = render_code_to_image(code, lang)
+                        if res:
+                            img_b, w, h = res
+                            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                            tmp.write(img_b)
+                            tmp.flush()
+                            temp_files.append(tmp.name)
+                            tmp.close()
+                            
+                            # Constrain width to A4 page margins if it's too wide
+                            max_w = A4[0] - (4 * cm) 
+                            if w > max_w:
+                                ratio = max_w / w
+                                w = max_w
+                                h = h * ratio
+
+                            rl_img = RLImage(tmp.name, width=w, height=h)
+                            rl_img.hAlign = "CENTER"
+                            story.append(rl_img)
+                            story.append(Spacer(1, 8))
+                        else:
+                            # Fallback if Pygments fails
+                            story.append(Paragraph(f"<font name='Courier'>{html.escape(code)}</font>", style_code))
                         continue
                     
                     if line.startswith("### "):
@@ -451,6 +580,7 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @error_guard("pdf_command")
+@rate_limit(max_tokens=3, refill_rate=1, interval=15)
 async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     history = get_history(uid)
@@ -472,6 +602,7 @@ async def cmd_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @error_guard("diagram_command")
+@rate_limit(max_tokens=2, refill_rate=1, interval=30)
 async def cmd_diagram(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = " ".join(ctx.args) if ctx.args else ""
     if not query:
@@ -492,6 +623,7 @@ async def cmd_diagram(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @error_guard("text_message")
+@rate_limit(max_tokens=5, refill_rate=1, interval=10)
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_text = update.message.text
@@ -523,6 +655,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @error_guard("photo_message")
+@rate_limit(max_tokens=3, refill_rate=1, interval=20)
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     caption = update.message.caption or ""
@@ -554,6 +687,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @error_guard("audio_message")
+@rate_limit(max_tokens=3, refill_rate=1, interval=20)
 async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     audio = update.message.voice or update.message.audio
@@ -599,6 +733,7 @@ async def handle_audio(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 @error_guard("document_message")
+@rate_limit(max_tokens=3, refill_rate=1, interval=20)
 async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     mime = doc.mime_type or ""
