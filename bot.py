@@ -105,6 +105,7 @@ async def report_error(error: Exception, context_info: str = ""):
     except Exception as e:
         logger.error(f"Failed to send error report: {e}")
 
+
 def error_guard(context_label: str = ""):
     def decorator(func):
         async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
@@ -112,7 +113,16 @@ def error_guard(context_label: str = ""):
                 return await func(update, ctx, *args, **kwargs)
             except Exception as exc:
                 user = update.effective_user
-                info = f"{context_label} | user={user.id if user else '?'}"
+                
+                # Extract username or fallback to first_name
+                if user:
+                    username_str = f"@{user.username}" if user.username else f"{user.first_name} (no @username)"
+                    user_info = f"{user.id} ({username_str})"
+                else:
+                    user_info = "?"
+
+                info = f"{context_label} | user={user_info}"
+                
                 logger.exception(f"Error in {func.__name__}: {exc}")
                 await report_error(exc, info)
                 try:
