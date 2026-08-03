@@ -157,7 +157,7 @@ async def report_error(error: Exception, context_info: str = ""):
     
     try:
         response = await http_client.post(
-          f"https://api.telegram.org/bot{ERROR_BOT_TOKEN}/sendMessage",
+            f"https://api.telegram.org/bot{ERROR_BOT_TOKEN}/sendMessage",
             json={
                 "chat_id": ERROR_CHAT_ID,
                 "text": message,
@@ -557,6 +557,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Commands:\n"
         f"/pdf — convert last answer to PDF\n"
         f"/diagram &lt;prompt&gt; — generate an AI diagram\n"
+        f"/status — check hosting environment\n"
         f"/reset — clear memory & start fresh\n"
         f"/help — contact the admin"
     )
@@ -569,6 +570,28 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🆘 Need help, have feedback, or want to report an issue?\n\n"
         f"<b>Contact the Admin:</b> {ADMIN_ID}"
     )
+    await send_html_chunk(update.message, msg)
+
+
+@error_guard("status_command")
+@rate_limit(max_tokens=3, refill_rate=1, interval=20)
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Check for variables that Railway automatically injects
+    is_railway = os.environ.get("RAILWAY_ENVIRONMENT") is not None
+    is_cloud = os.environ.get("PORT") is not None
+
+    if is_railway:
+        location = "☁️ Railway Cloud Container"
+    elif is_cloud:
+        location = "☁️ Generic Cloud Hosting"
+    else:
+        location = "💻 Local Computer (Development Mode)"
+
+    msg = (
+        f"🤖 <b>EduBot Status</b>\n"
+        f"<b>Host Environment:</b> {location}\n"
+    )
+    
     await send_html_chunk(update.message, msg)
 
 
@@ -773,6 +796,7 @@ async def setup_bot_commands(application: Application):
     commands = [
         BotCommand("start", "Wake up JARVIS ⚡️"),
         BotCommand("reset", "Clear memory & start fresh 🔄"),
+        BotCommand("status", "Check host environment ☁️"),
         BotCommand("help", "Contact the Admin 🆘"),
         BotCommand("pdf", "Convert last answer to PDF 📄"),
         BotCommand("diagram", "Generate an AI diagram 📊")
@@ -801,6 +825,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help",  cmd_help))
     app.add_handler(CommandHandler("reset", cmd_reset))  
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("pdf",   cmd_pdf))
     app.add_handler(CommandHandler("diagram", cmd_diagram))
 
