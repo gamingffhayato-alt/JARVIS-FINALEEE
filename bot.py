@@ -78,7 +78,7 @@ ERROR_BOT_TOKEN  = os.environ.get("TELEGRAM_ERROR_BOT_TOKEN", "")
 ERROR_CHAT_ID    = os.environ.get("TELEGRAM_ERROR_CHAT_ID", "")
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
 
-GROQ_MODEL       = "llama-3.1-8b-instant"
+GROQ_MODEL       = "llama-3.3-70b-versatile"
 WHISPER_MODEL    = "whisper-large-v3"
 MAX_TOKENS       = 4096
 
