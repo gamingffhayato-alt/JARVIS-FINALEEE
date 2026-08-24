@@ -1,6 +1,6 @@
 """
 EduBot (JARVIS) - AI-Powered Education Telegram Bot
-Uses Groq API (Llama 4 Scout) for AI, supports text/image/audio input,
+Uses NVIDIA API (Nemotron 3.5 Lightning 30B) for AI text/vision, Groq for audio input,
 generates PDFs with rendered math/physics and code syntax highlighting, 
 generates Nano Banana diagrams.
 Errors are forwarded to a separate error-reporting bot.
@@ -67,6 +67,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode, ChatAction
 from groq import AsyncGroq
+from openai import AsyncOpenAI
 
 # Import our new Nano Banana generator
 from image_generator import generate_diagram
@@ -78,7 +79,11 @@ ERROR_BOT_TOKEN  = os.environ.get("TELEGRAM_ERROR_BOT_TOKEN", "")
 ERROR_CHAT_ID    = os.environ.get("TELEGRAM_ERROR_CHAT_ID", "")
 GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
 
-GROQ_MODEL       = "openai/gpt-oss-20b"
+# NVIDIA Inference API Configuration (loaded safely via environment variables)
+NVIDIA_API_KEY   = os.environ.get("NVIDIA_API_KEY", "")
+NVIDIA_BASE_URL  = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+
+AI_MODEL         = os.environ.get("AI_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
 WHISPER_MODEL    = "whisper-large-v3"
 MAX_TOKENS       = 4096
 
@@ -237,8 +242,15 @@ def sanitize_latex_for_pdf(text: str) -> str:
     text = re.sub(r"\\text\{(.*?)\}", r"\\mathrm{\1}", text)
     return text
 
-# ─────────────────────────── Groq Client ────────────────────────────
+# ─────────────────────────── API Clients ────────────────────────────
 
+# Client for NVIDIA's OpenAI-compatible API
+ai_client = AsyncOpenAI(
+    api_key=NVIDIA_API_KEY,
+    base_url=NVIDIA_BASE_URL,
+)
+
+# Groq Client for Whisper audio transcribing
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 # Use raw string r"""...""" to fix \Omega escape sequence warning
@@ -487,11 +499,14 @@ def build_pdf(title: str, content: str, diagram_images: list[tuple[bytes, str]] 
             except Exception:
                 pass
 
-# ─────────────────────────── Groq Helpers ───────────────────────────
+# ─────────────────────────── AI Helper Functions ───────────────────
 
 async def ask_groq_text(messages: list) -> str:
-    response = await groq_client.chat.completions.create(
-        model=GROQ_MODEL, messages=messages, max_tokens=MAX_TOKENS, temperature=0.7,
+    response = await ai_client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+        max_tokens=MAX_TOKENS,
+        temperature=0.7,
     )
     return response.choices[0].message.content
 
@@ -517,8 +532,10 @@ async def ask_groq_vision(image_bytes: bytes, prompt: str, mime: str = "image/jp
             {"type": "text", "text": prompt or "Please analyse this image and explain."}
         ]}
     ]
-    response = await groq_client.chat.completions.create(
-        model=GROQ_MODEL, messages=messages, max_tokens=MAX_TOKENS,
+    response = await ai_client.chat.completions.create(
+        model=AI_MODEL,
+        messages=messages,
+        max_tokens=MAX_TOKENS,
     )
     return response.choices[0].message.content
 
